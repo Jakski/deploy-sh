@@ -70,8 +70,7 @@ indent() {
 }
 
 rsync_git_repository() {
-	: \
-		"${DEPLOY_RELEASES_DIR:?}"
+	: "${DEPLOY_RELEASE_DIR:?}"
 	declare files config=${DEPLOY_SSH_CONFIG:-}
 	cat > "${DEPLOY_TMP_DIR}/${DEPLOY_HOST_NUM}.ssh_config" <<<"$config"
 	files=$(git ls-files --cached --other --exclude-standard)
@@ -84,7 +83,25 @@ rsync_git_repository() {
 		--protect-args \
 		--files-from <(echo "$files") \
 		. \
-		"${DEPLOY_HOST_ADDRESS}:${DEPLOY_RELEASES_DIR}/${DEPLOY_TIMESTAMP}"
+		"${DEPLOY_HOST_ADDRESS}:${DEPLOY_RELEASE_DIR}"
+}
+
+remove_old_releases() {
+	: "${DEPLOY_RELEASE_DIR:?}"
+	declare releases_dir release_dir old_release release_num=0
+	releases_dir=$(realpath "${DEPLOY_RELEASE_DIR}/..")
+	release_dir=$(realpath "$DEPLOY_RELEASE_DIR")
+	while read -r old_release; do
+		old_release="${releases_dir}/${old_release}"
+		release_num=$((release_num + 1))
+		if [ "$release_num" -le "${DEPLOY_RELEASES_KEEP:-3}" ]; then
+			continue
+		fi
+		if [ "$old_release" = "$release_dir" ]; then
+			continue
+		fi
+		rm -rf "$old_release"
+	done < <(ls -1t "$releases_dir")
 }
 
 start_jobs() {
@@ -94,7 +111,6 @@ start_jobs() {
 			set -euo pipefail -o errtrace
 			shopt -s inherit_errexit nullglob
 			${DEPLOY_OPTIONS:-}
-			DEPLOY_TIMESTAMP=$(q "$DEPLOY_TIMESTAMP")
 			DEPLOY_HOST_NAME=$(q "$host_name")
 			DEPLOY_HOST_ADDRESS=$(q "$host_address")
 			DEPLOY_HOST_NUM=$(q "$host_num")
@@ -169,7 +185,6 @@ run_task() {
 main() {
 	trap 'on_error "${BASH_SOURCE[0]}:${LINENO}"' ERR
 	trap on_exit EXIT
-	DEPLOY_TIMESTAMP=${DEPLOY_TIMESTAMP:-"$(date +%s)"}
 	declare input_script=$1
 	shift
 	DEPLOY_OPTIONS=$(GET_OPTS_PREFIX="DEPLOY" get_opts "$@")

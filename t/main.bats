@@ -86,19 +86,70 @@ function upload_release { #@test
 		DEPLOY_DEFAULT_HOSTS="localhost1 127.0.0.1"
 		run_task \
 			name "Create" \
-			script "mkdir \"\${DEPLOY_RELEASES_DIR}\""
+			script "mkdir -p /tmp/code"
 		run_task \
 			name "Deploy" \
 			local 1 \
 			function "rsync_git_repository"
 		run_task \
 			name "Show" \
-			script "stat \"\${DEPLOY_RELEASES_DIR}/\${DEPLOY_TIMESTAMP}/t/main.bats\""
+			script "stat \"\${DEPLOY_RELEASE_DIR}/t/main.bats\""
 		run_task \
 			name "Remove" \
-			script "rm -rf \"\${DEPLOY_RELEASES_DIR}\""
+			script "rm -rf /tmp/code"
 	EOF
-	run -0 "$TEST_SCRIPT" "$TEST_INPUT_FILE" releases_dir /tmp/code
+	run -0 "$TEST_SCRIPT" "$TEST_INPUT_FILE" release_dir /tmp/code/1
+}
+
+function release_management { #@test
+	cat >> "$TEST_INPUT_FILE" <<-"EOF"
+		DEPLOY_DEFAULT_HOSTS="localhost1 127.0.0.1"
+		run_task \
+			name "Create" \
+			script "mkdir -p /tmp/code/releases"
+		run_task \
+			name "Deploy" \
+			local 1 \
+			function "rsync_git_repository"
+		run_task \
+			name "Verify" \
+			script "stat \"\${DEPLOY_RELEASE_DIR}/t/main.bats\" > /dev/null"
+		run_task \
+			name "Link" \
+			script "ln -Tsf \"\${DEPLOY_RELEASE_DIR}\" /tmp/code/current"
+		run_task \
+			name "Remove old" \
+			function "remove_old_releases"
+	EOF
+	declare release_num
+	for release_num in {1..5}; do
+		run -0 "$TEST_SCRIPT" "$TEST_INPUT_FILE" release_dir /tmp/code/releases/"$release_num"
+	done
+	cat >> "$TEST_INPUT_FILE" <<-"EOF"
+		run_task \
+			name "Verify current" \
+			script "stat /tmp/code/current/t/main.bats > /dev/null"
+		run_task \
+			name "Show current" \
+			script "echo -n \"Current: \" && realpath /tmp/code/current"
+		run_task \
+			name "Count releases" \
+			script "echo -n \"Releases: \" && ls -1 /tmp/code/releases | wc -l"
+		run_task \
+			name "Remove" \
+			script "rm -rf /tmp/code"
+	EOF
+	run -0 "$TEST_SCRIPT" "$TEST_INPUT_FILE" release_dir /tmp/code/releases/6  releases_keep 2
+	declare text="Current: /tmp/code/releases/6"
+	if ! echo "$output" | grep "$text" >/dev/null; then
+		echo "Failed to find \"${text}\" in output"
+		return 1
+	fi
+	declare text="Releases: 2"
+	if ! echo "$output" | grep "$text" >/dev/null; then
+		echo "Failed to find \"${text}\" in output"
+		return 1
+	fi
 }
 
 function forced_fail { #@test
