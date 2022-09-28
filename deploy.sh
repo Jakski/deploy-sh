@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+#shellcheck disable=SC2128
+# SC2128: Expanding an array without an index only gives the first element.
 
 set -euo pipefail -o errtrace
 shopt -s inherit_errexit nullglob
@@ -85,28 +87,8 @@ rsync_git_repository() {
 		"${DEPLOY_HOST_ADDRESS}:${DEPLOY_RELEASES_DIR}/${DEPLOY_TIMESTAMP}"
 }
 
-run_task() {
-	eval "$(get_opts "$@")"
-	: "${OPT_NAME:?"Step's name must be provided"}"
-	if [ -z "${OPT_HOSTS:-}" ]; then
-		if [ -z "${DEPLOY_DEFAULT_HOSTS:-}" ]; then
-			ERR_MSG="Target hosts must be provided"
-			return 1
-		else
-			declare OPT_HOSTS=$DEPLOY_DEFAULT_HOSTS
-		fi
-	fi
-	declare host_name host_address host_num=0
-	declare host_jobs=""
-	declare exec_func="exec_ssh"
-	if [ "${OPT_LOCAL:-0}" = 1 ]; then
-		exec_func="exec_bash"
-	fi
-	ensure_tmp_dir
-	if [ -n "${OPT_FUNCTION:-}" ]; then
-		declare OPT_SCRIPT
-		OPT_SCRIPT=$(type "$OPT_FUNCTION" | tail -n +4 | head -n -1)
-	fi
+start_jobs() {
+	declare hosts=$1 host_num=0 host_name host_address
 	while read -r host_name host_address; do
 		"$exec_func" "$host_num" "$host_address" >"${SCRIPT_TMP_DIR}/${host_num}.output" 2>&1 <<-EOF &
 			set -euo pipefail -o errtrace
@@ -118,11 +100,13 @@ run_task() {
 			DEPLOY_HOST_NUM=$(q "$host_num")
 			${OPT_SCRIPT:-}
 		EOF
-		host_jobs="$host_jobs"$'\n'"${!}"
+		echo "$!"
 		host_num=$((host_num + 1))
-	done <<< "$OPT_HOSTS"
-	host_jobs=$(grep '\S' <<< "$host_jobs")
-	host_num=0
+	done <<< "$hosts"
+}
+
+wait_for_jobs() {
+	declare hosts=$1 host_jobs=$2 host_num=0
 	while read -r host_name host_address; do
 		declare job_status=0 job_id
 		job_id=$(head -n 1 <<< "$host_jobs")
@@ -130,9 +114,12 @@ run_task() {
 		wait "$job_id" || job_status=$?
 		echo "$job_status" > "${SCRIPT_TMP_DIR}/${host_num}.status"
 		host_num=$((host_num + 1))
-	done <<< "$OPT_HOSTS"
-	declare errors=""
-	echo "Step: ${OPT_NAME}"
+	done <<< "$hosts"
+}
+
+report_jobs() {
+	declare hosts=$1 step_name=$2 errors=""
+	echo "Step: ${step_name}"
 	host_num=0
 	while read -r host_name host_address; do
 		declare exit_code
@@ -143,7 +130,7 @@ run_task() {
 		fi
 		indent "    " < "${SCRIPT_TMP_DIR}/${host_num}.output"
 		host_num=$((host_num + 1))
-	done <<< "$OPT_HOSTS"
+	done <<< "$hosts"
 	if [ -n "$errors" ]; then
 		ERR_MSG="-------------------------------------------------------------------------------"
 		ERR_MSG="$ERR_MSG"$'\n'"$errors"
@@ -151,10 +138,38 @@ run_task() {
 	fi
 }
 
+run_task() {
+	eval "$(get_opts "$@")"
+	: "${OPT_NAME:?"Step's name must be provided"}"
+	if [ -z "${OPT_HOSTS:-}" ]; then
+		if [ -z "${DEPLOY_DEFAULT_HOSTS:-}" ]; then
+			ERR_MSG="Target hosts must be provided"
+			return 1
+		else
+			declare OPT_HOSTS=$DEPLOY_DEFAULT_HOSTS
+		fi
+	fi
+	declare exec_func="exec_ssh"
+	if [ "${OPT_LOCAL:-0}" = 1 ]; then
+		exec_func="exec_bash"
+	fi
+	ensure_tmp_dir
+	if [ -n "${OPT_FUNCTION:-}" ]; then
+		declare OPT_SCRIPT
+		OPT_SCRIPT=$(type "$OPT_FUNCTION" | tail -n +4 | head -n -1)
+	fi
+	declare host_jobs
+	# It can't be done in subshell, because Bash needs to own job IDs.
+	start_jobs "$OPT_HOSTS" > "${SCRIPT_TMP_DIR}/jobs"
+	mapfile -d "" host_jobs < "${SCRIPT_TMP_DIR}/jobs"
+	wait_for_jobs "$OPT_HOSTS" "$host_jobs"
+	report_jobs "$OPT_HOSTS" "$OPT_NAME"
+}
+
 main() {
 	trap 'on_error "${BASH_SOURCE[0]}:${LINENO}"' ERR
 	trap on_exit EXIT
-	DEPLOY_TIMESTAMP=$(date +%s)
+	DEPLOY_TIMESTAMP=${DEPLOY_TIMESTAMP:-"$(date +%s)"}
 	declare input_script=$1
 	shift
 	DEPLOY_OPTIONS=$(GET_OPTS_PREFIX="DEPLOY" get_opts "$@")

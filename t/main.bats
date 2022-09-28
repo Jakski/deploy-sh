@@ -100,3 +100,13 @@ function upload_release { #@test
 	EOF
 	run -0 "$TEST_SCRIPT" "$TEST_INPUT_FILE" releases_dir /tmp/code
 }
+
+function forced_fail { #@test
+	cat >> "$TEST_INPUT_FILE" <<-"EOF"
+		DEPLOY_DEFAULT_HOSTS="localhost1 127.0.0.1"
+		run_task \
+			name "Fail" \
+			script "exit 1"
+	EOF
+	run -1 "$TEST_SCRIPT" "$TEST_INPUT_FILE"
+}
