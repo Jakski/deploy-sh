@@ -57,7 +57,7 @@ function simple_command { #@test
 			name "Test" \
 			script "echo running-on-\${DEPLOY_HOST_NAME}"
 	EOF
-	run -0 "$TEST_SCRIPT" "$TEST_INPUT_FILE"
+	run -0 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE"
 	declare i
 	for i in {1..3}; do
 		declare text="running-on-localhost${i}"
@@ -77,7 +77,7 @@ function parallel_running { #@test
 			name "Remove" \
 			script "rm /tmp/host-\${DEPLOY_HOST_NAME}"
 	EOF
-	run -0 "$TEST_SCRIPT" "$TEST_INPUT_FILE"
+	run -0 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE"
 	[ "$(echo "$output" | grep "/tmp/host-" | wc -l)" = 9 ]
 }
 
@@ -98,7 +98,7 @@ function upload_release { #@test
 			name "Remove" \
 			script "rm -rf /tmp/code"
 	EOF
-	run -0 "$TEST_SCRIPT" "$TEST_INPUT_FILE" release_dir /tmp/code/1
+	run -0 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE" release_dir /tmp/code/1
 }
 
 function release_management { #@test
@@ -122,8 +122,8 @@ function release_management { #@test
 			function "remove_old_releases"
 	EOF
 	declare release_num
-	for release_num in {1..5}; do
-		run -0 "$TEST_SCRIPT" "$TEST_INPUT_FILE" release_dir /tmp/code/releases/"$release_num"
+	for release_num in {1..2}; do
+		run -0 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE" release_dir /tmp/code/releases/"$release_num"
 	done
 	cat >> "$TEST_INPUT_FILE" <<-"EOF"
 		run_task \
@@ -136,11 +136,14 @@ function release_management { #@test
 			name "Count releases" \
 			script "echo -n \"Releases: \" && ls -1 /tmp/code/releases | wc -l"
 		run_task \
+			name "Ensure release 2 exists" \
+			script "stat /tmp/code/releases/2 >/dev/null"
+		run_task \
 			name "Remove" \
 			script "rm -rf /tmp/code"
 	EOF
-	run -0 "$TEST_SCRIPT" "$TEST_INPUT_FILE" release_dir /tmp/code/releases/6  releases_keep 2
-	declare text="Current: /tmp/code/releases/6"
+	run -0 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE" release_dir /tmp/code/releases/3  releases_keep 2
+	declare text="Current: /tmp/code/releases/3"
 	if ! echo "$output" | grep "$text" >/dev/null; then
 		echo "Failed to find \"${text}\" in output"
 		return 1
@@ -159,5 +162,87 @@ function forced_fail { #@test
 			name "Fail" \
 			script "exit 1"
 	EOF
-	run -1 "$TEST_SCRIPT" "$TEST_INPUT_FILE"
+	run -1 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE"
+}
+
+function yaml_release_management { #@test
+	cat > "$TEST_INPUT_FILE" <<EOF
+---
+ssh_config: |
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  LogLevel ERROR
+  Port 2222
+  User tests
+  IdentityFile ${BATS_RUN_TMPDIR}/keys/id_rsa
+hosts:
+  localhost1: 127.0.0.1
+EOF
+	cat >> "$TEST_INPUT_FILE" <<"EOF"
+deploy:
+  - name: Create
+    script: mkdir -p /tmp/code/releases
+  - name: Deploy
+    local: true
+    function: rsync_git_repository
+  - name: Verify
+    script: stat "${DEPLOY_RELEASE_DIR}/t/main.bats" > /dev/null
+  - name: Link
+    script: ln -Tsf "${DEPLOY_RELEASE_DIR}" /tmp/code/current
+  - name: Remove old
+    function: remove_old_releases
+EOF
+	declare release_num
+	for release_num in {1..2}; do
+		run -0 "$TEST_SCRIPT" --format yaml -f "$TEST_INPUT_FILE" release_dir /tmp/code/releases/"$release_num"
+	done
+	cat >> "$TEST_INPUT_FILE" <<"EOF"
+  - name: Verify current
+    script: stat /tmp/code/current/t/main.bats > /dev/null
+  - name: Show current
+    script: |
+      echo -n "Current: "
+      realpath /tmp/code/current
+  - name: Count releases
+    script: |
+      echo -n "Releases: "
+      ls -1 /tmp/code/releases | wc -l
+  - name: Ensure release 2 exists
+    script: stat /tmp/code/releases/2 >/dev/null
+  - name: Remove
+    script: rm -rf /tmp/code
+EOF
+	run -0 "$TEST_SCRIPT" --format yaml -f "$TEST_INPUT_FILE" release_dir /tmp/code/releases/3  releases_keep 2
+	declare text="Current: /tmp/code/releases/3"
+	if ! echo "$output" | grep "$text" >/dev/null; then
+		echo "Failed to find \"${text}\" in output"
+		return 1
+	fi
+	declare text="Releases: 2"
+	if ! echo "$output" | grep "$text" >/dev/null; then
+		echo "Failed to find \"${text}\" in output"
+		return 1
+	fi
+}
+
+function yaml_run_once { #@test
+	cat > "$TEST_INPUT_FILE" <<EOF
+---
+ssh_config: |
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  LogLevel ERROR
+  Port 2222
+  User tests
+  IdentityFile ${BATS_RUN_TMPDIR}/keys/id_rsa
+hosts:
+  localhost1: 127.0.0.1
+  localhost2: 127.0.0.1
+deploy:
+  - name: Run once
+    script: 'echo "running-once-on: \${DEPLOY_HOST_NAME}"'
+    run_once: true
+EOF
+	run -0 "$TEST_SCRIPT" --format yaml -f "$TEST_INPUT_FILE"
+	[ "$(echo "$output" | grep -E '^\s*running-once-on: localhost1$' | wc -l)" = 1 ]
 }

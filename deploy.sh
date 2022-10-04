@@ -46,6 +46,80 @@ get_opts() {
 	done
 }
 
+jq_add_field() {
+	declare name=$1 default=${2:-}
+	if [ -z "$default" ]; then
+		echo -n "(if has(\"${name}\") then .${name} else error(\"field ${name} is required\") end)"
+	else
+		echo -n "(if has(\"${name}\") then .${name} else ${default} end)"
+	fi
+}
+
+yaml_to_json() {
+	declare script
+	mapfile -d "" script <<-EOF
+		from ruamel import yaml
+		import json, sys
+		json.dump(yaml.safe_load(sys.stdin), sys.stdout)
+	EOF
+	python3 -c "$script"
+}
+
+deploy_from_yaml() {
+	declare input=$1 steps_query base64_steps hosts ssh_config
+	input=$(yaml_to_json < "$input")
+	hosts=$(jq -er '.hosts | to_entries[] | (.key|tostring) + " " + (.value|tostring)' <<< "$input")
+	ssh_config=$(jq -r ".ssh_config" <<< "$input")
+	if [ -n "$ssh_config" ]; then
+		DEPLOY_SSH_CONFIG=$ssh_config
+	fi
+	mapfile -d "" steps_query <<-EOF
+		.deploy[]
+		| [
+				$(jq_add_field "name"),
+				$(jq_add_field "script" '" "'),
+				$(jq_add_field "run_once" "false"),
+				$(jq_add_field "function" '" "'),
+				$(jq_add_field "local" "false")
+			][]
+		| @base64
+	EOF
+	base64_steps=$(jq -r "$steps_query" <<< "$input")
+	declare step_name step_script step_run_once step_function
+	while read -r step_name; do
+		step_name=$(echo "$step_name" | base64 -d)
+		read -r step_script; step_script=$(echo "$step_script" | base64 -d)
+		read -r step_run_once; step_run_once=$(echo "$step_run_once" | base64 -d)
+		read -r step_function; step_function=$(echo "$step_function" | base64 -d)
+		read -r step_local; step_local=$(echo "$step_local" | base64 -d)
+		declare targets="$hosts"
+		if [ "$step_run_once" = "true" ]; then
+			declare targets_array
+			mapfile -t targets_array <<< "$targets"
+			targets=${targets_array[0]}
+		fi
+		declare args=()
+		args+=(
+			name "$step_name"
+			hosts "$targets"
+		)
+		if [ "$step_script" != " " ]; then
+			args+=(script "$step_script")
+		elif [ "$step_function" != " " ]; then
+			args+=(function "$step_function")
+		else
+			ERR_MSG="Step must have function or script defined"
+			return 1
+		fi
+		if [ "$step_local" = "true" ]; then
+			args+=(local 1)
+		else
+			args+=(local 0)
+		fi
+		run_task "${args[@]}"
+	done <<< "$base64_steps"
+}
+
 exec_ssh() {
 	declare host_num=$1 host_address=$2 cmd=${3:-"/bin/bash -"} config=${DEPLOY_SSH_CONFIG:-""}
 	ensure_tmp_dir
@@ -182,14 +256,41 @@ run_task() {
 	report_jobs "$OPT_HOSTS" "$OPT_NAME"
 }
 
+get_function_body() {
+	type "$1" | tail -n +4 | head -n -1
+}
+
 main() {
 	trap 'on_error "${BASH_SOURCE[0]}:${LINENO}"' ERR
 	trap on_exit EXIT
-	declare input_script=$1
-	shift
+	declare opt_format="shell" opt_input=""
+	while [ "$#" != 0 ]; do
+		case "$1" in
+		-f|--file)
+			shift
+			opt_input=$1
+			shift
+		;;
+		--format)
+			shift
+			opt_format=$1
+			shift
+		;;
+		*)
+			break
+		;;
+		esac
+	done
 	DEPLOY_OPTIONS=$(GET_OPTS_PREFIX="DEPLOY" get_opts "$@")
-	#shellcheck disable=SC1090
-	source "$input_script"
+	if [ "$opt_format" = "shell" ]; then
+		#shellcheck disable=SC1090
+		source "$opt_input"
+	elif [ "$opt_format" = "yaml" ]; then
+		deploy_from_yaml "$opt_input"
+	else
+		ERR_MSG="Wrong deployment format: ${opt_format}"
+		return 1
+	fi
 }
 
 main "$@"
