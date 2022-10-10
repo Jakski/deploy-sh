@@ -9,6 +9,7 @@ SCRIPT_TMP_DIR=""
 ERR_MSG=""
 DEPLOY_DEFAULT_HOSTS=""
 DEPLOY_EXTRAS=""
+: "${DEPLOY_SSH_CONFIG:=}"
 
 q() {
 	printf '%q' "$*"
@@ -27,12 +28,6 @@ on_error() {
 on_exit() {
 	if [ -n "$SCRIPT_TMP_DIR" ]; then
 		rm -rf "$SCRIPT_TMP_DIR"
-	fi
-}
-
-ensure_tmp_dir() {
-	if [ -z "$SCRIPT_TMP_DIR" ]; then
-		SCRIPT_TMP_DIR=$(mktemp -d -t deploy-sh.XXXXXXXX)
 	fi
 }
 
@@ -74,24 +69,23 @@ deploy_from_yaml() {
 	if [ -n "$ssh_config" ]; then
 		DEPLOY_SSH_CONFIG=$ssh_config
 	fi
+	cat > "${SCRIPT_TMP_DIR}/ssh_config" <<<"$DEPLOY_SSH_CONFIG"
 	mapfile -d "" steps_query <<-EOF
 		.deploy[]
 		| [
 				$(jq_add_field "name"),
-				$(jq_add_field "script" '" "'),
+				$(jq_add_field "script"),
 				$(jq_add_field "run_once" "false"),
-				$(jq_add_field "function" '" "'),
 				$(jq_add_field "local" "false")
 			][]
 		| @base64
 	EOF
 	base64_steps=$(jq -r "$steps_query" <<< "$input")
-	declare step_name step_script step_run_once step_function
+	declare step_name step_script step_run_once
 	while read -r step_name; do
 		step_name=$(echo "$step_name" | base64 -d)
 		read -r step_script; step_script=$(echo "$step_script" | base64 -d)
 		read -r step_run_once; step_run_once=$(echo "$step_run_once" | base64 -d)
-		read -r step_function; step_function=$(echo "$step_function" | base64 -d)
 		read -r step_local; step_local=$(echo "$step_local" | base64 -d)
 		declare targets="$hosts"
 		if [ "$step_run_once" = "true" ]; then
@@ -103,15 +97,8 @@ deploy_from_yaml() {
 		args+=(
 			name "$step_name"
 			hosts "$targets"
+			script "$step_script"
 		)
-		if [ "$step_script" != " " ]; then
-			args+=(script "$step_script")
-		elif [ "$step_function" != " " ]; then
-			args+=(function "$step_function")
-		else
-			ERR_MSG="Step must have function or script defined"
-			return 1
-		fi
 		if [ "$step_local" = "true" ]; then
 			args+=(local 1)
 		else
@@ -121,19 +108,20 @@ deploy_from_yaml() {
 	done <<< "$base64_steps"
 }
 
+#shellcheck disable=SC2120
 exec_ssh() {
-	declare host_num=$1 host_address=$2 cmd=${3:-"/bin/bash -"} config=${DEPLOY_SSH_CONFIG:-""}
-	ensure_tmp_dir
-	cat > "${SCRIPT_TMP_DIR}/${host_num}.ssh_config" <<<"$config"
+	declare \
+		host_num=${1:-"$DEPLOY_HOST_NUM"} \
+		host_address=${2:-"$DEPLOY_HOST_ADDRESS"} \
+		cmd=${3:-"/bin/bash -"}
 	exec ssh \
-		-F "${SCRIPT_TMP_DIR}/${host_num}.ssh_config" \
+		-F "${SCRIPT_TMP_DIR}/ssh_config" \
 		"$host_address" \
 		"$cmd"
 }
 
 exec_bash() {
-	DEPLOY_TMP_DIR=$SCRIPT_TMP_DIR \
-	DEPLOY_SSH_CONFIG=${DEPLOY_SSH_CONFIG:-} \
+	SCRIPT_TMP_DIR=$SCRIPT_TMP_DIR \
 		exec /usr/bin/env bash -
 }
 
@@ -146,11 +134,11 @@ indent() {
 
 rsync_git_repository() {
 	: "${DEPLOY_RELEASE_DIR:?}"
-	declare files config=${DEPLOY_SSH_CONFIG:-}
-	cat > "${DEPLOY_TMP_DIR}/${DEPLOY_HOST_NUM}.ssh_config" <<<"$config"
-	files=$(git ls-files --cached --other --exclude-standard)
+	declare files revision
+	files=$(git ls-tree -r --name-only HEAD)
+	revision=$(git rev-parse HEAD)
 	declare config_file
-	config_file=$(printf "%s" "${DEPLOY_TMP_DIR}/${DEPLOY_HOST_NUM}.ssh_config")
+	config_file=$(printf "%s" "${SCRIPT_TMP_DIR}/ssh_config")
 	rsync \
 		--rsh "ssh -F ${config_file}" \
 		--archive \
@@ -159,6 +147,10 @@ rsync_git_repository() {
 		--files-from <(echo "$files") \
 		. \
 		"${DEPLOY_HOST_ADDRESS}:${DEPLOY_RELEASE_DIR}"
+	exec_ssh <<-EOF
+		cd $(q "$DEPLOY_RELEASE_DIR")
+		echo $(q "$revision") > REVISION
+	EOF
 }
 
 remove_old_releases() {
@@ -214,8 +206,7 @@ wait_for_jobs() {
 }
 
 report_jobs() {
-	declare hosts=$1 step_name=$2 errors=""
-	echo "Step: ${step_name}"
+	declare hosts=$1 errors=""
 	host_num=0
 	while read -r host_name host_address; do
 		declare exit_code
@@ -249,17 +240,18 @@ run_task() {
 	if [ "${OPT_LOCAL:-0}" = 1 ]; then
 		exec_func="exec_bash"
 	fi
-	ensure_tmp_dir
 	if [ -n "${OPT_FUNCTION:-}" ]; then
 		declare OPT_SCRIPT
 		OPT_SCRIPT=$(type "$OPT_FUNCTION" | tail -n +4 | head -n -1)
 	fi
-	declare host_jobs
+	declare timestamp; timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+	echo "${timestamp} Step: ${OPT_NAME}"
 	# It can't be done in subshell, because Bash needs to own job IDs.
 	start_jobs "$OPT_HOSTS" > "${SCRIPT_TMP_DIR}/jobs"
+	declare host_jobs
 	mapfile -d "" host_jobs < "${SCRIPT_TMP_DIR}/jobs"
 	wait_for_jobs "$OPT_HOSTS" "$host_jobs"
-	report_jobs "$OPT_HOSTS" "$OPT_NAME"
+	report_jobs "$OPT_HOSTS"
 }
 
 get_function_body() {
@@ -299,7 +291,13 @@ main() {
 		esac
 	done
 	add_deployment_variables "$@"
+	declare fn
+	for fn in q exec_ssh rsync_git_repository remove_old_releases; do
+		add_deployment_function "$fn"
+	done
+	SCRIPT_TMP_DIR=$(mktemp -d -t deploy-sh.XXXXXXXX)
 	if [ "$opt_format" = "shell" ]; then
+		cat > "${SCRIPT_TMP_DIR}/ssh_config" <<<"$DEPLOY_SSH_CONFIG"
 		#shellcheck disable=SC1090
 		source "$opt_input"
 	elif [ "$opt_format" = "yaml" ]; then

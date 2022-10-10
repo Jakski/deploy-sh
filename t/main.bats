@@ -39,15 +39,14 @@ setup() {
 	mkdir -p "${BATS_TEST_TMPDIR}"
 	export TEST_SCRIPT=$(realpath "${BATS_TEST_DIRNAME}/../deploy.sh")
 	export TEST_INPUT_FILE="${BATS_TEST_TMPDIR}/script"
+	export DEPLOY_SSH_CONFIG="\
+StrictHostKeyChecking no
+UserKnownHostsFile /dev/null
+LogLevel ERROR
+Port 2222
+User tests
+IdentityFile ${BATS_RUN_TMPDIR}/keys/id_rsa"
 	cat > "$TEST_INPUT_FILE" <<-EOF
-		DEPLOY_SSH_CONFIG="\\
-		StrictHostKeyChecking no
-		UserKnownHostsFile /dev/null
-		LogLevel ERROR
-		Port 2222
-		User tests
-		IdentityFile ${BATS_RUN_TMPDIR}/keys/id_rsa"
-
 		DEPLOY_DEFAULT_HOSTS="\\
 		localhost1 127.0.0.1
 		localhost2 127.0.0.1
@@ -113,15 +112,20 @@ function upload_release { #@test
 		run_task \
 			name "Deploy" \
 			local 1 \
-			function "rsync_git_repository"
+			script "rsync_git_repository"
 		run_task \
 			name "Show" \
 			script "stat \"\${DEPLOY_RELEASE_DIR}/t/main.bats\""
 		run_task \
+			name "Show revision" \
+			script "cat \"\${DEPLOY_RELEASE_DIR}/REVISION\""
+		run_task \
 			name "Remove" \
 			script "rm -rf /tmp/code"
 	EOF
+	declare revision=$(git rev-parse HEAD)
 	run -0 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE" release_dir /tmp/code/1
+	find_in_output "$revision"
 }
 
 function release_management { #@test
@@ -133,7 +137,7 @@ function release_management { #@test
 		run_task \
 			name "Deploy" \
 			local 1 \
-			function "rsync_git_repository"
+			script "rsync_git_repository"
 		run_task \
 			name "Verify" \
 			script "stat \"\${DEPLOY_RELEASE_DIR}/t/main.bats\" > /dev/null"
@@ -142,7 +146,7 @@ function release_management { #@test
 			script "ln -Tsf \"\${DEPLOY_RELEASE_DIR}\" /tmp/code/current"
 		run_task \
 			name "Remove old" \
-			function "remove_old_releases"
+			script "remove_old_releases"
 	EOF
 	declare release_num
 	for release_num in {1..2}; do
@@ -199,13 +203,13 @@ deploy:
     script: mkdir -p /tmp/code/releases
   - name: Deploy
     local: true
-    function: rsync_git_repository
+    script: rsync_git_repository
   - name: Verify
     script: stat "${DEPLOY_RELEASE_DIR}/t/main.bats" > /dev/null
   - name: Link
     script: ln -Tsf "${DEPLOY_RELEASE_DIR}" /tmp/code/current
   - name: Remove old
-    function: remove_old_releases
+    script: remove_old_releases
 EOF
 	declare release_num
 	for release_num in {1..2}; do
