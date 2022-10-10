@@ -11,6 +11,7 @@ main() {
 		wget -q -O - "$BATS_URL" \
 			| tar -C ".bats" --strip-components 1 -zxf -
 	fi
+	shellcheck ./*.sh
 	./.bats/bin/bats "$@" --print-output-on-failure t
 }
 

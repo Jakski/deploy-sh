@@ -8,6 +8,7 @@ shopt -s inherit_errexit nullglob
 SCRIPT_TMP_DIR=""
 ERR_MSG=""
 DEPLOY_DEFAULT_HOSTS=""
+DEPLOY_EXTRAS=""
 
 q() {
 	printf '%q' "$*"
@@ -167,6 +168,10 @@ remove_old_releases() {
 	release_dir=$(realpath "$DEPLOY_RELEASE_DIR")
 	while read -r old_release; do
 		old_release="${releases_dir}/${old_release}"
+		# Omit links in case `current` is used to mark latest release.
+		if [ -L "$old_release" ]; then
+			continue
+		fi
 		release_num=$((release_num + 1))
 		if [ "$release_num" -le "${DEPLOY_RELEASES_KEEP:-3}" ]; then
 			continue
@@ -174,6 +179,7 @@ remove_old_releases() {
 		if [ "$old_release" = "$release_dir" ]; then
 			continue
 		fi
+		echo "Removing ${old_release}"
 		rm -rf "$old_release"
 	done < <(ls -1t "$releases_dir")
 }
@@ -184,7 +190,7 @@ start_jobs() {
 		"$exec_func" "$host_num" "$host_address" >"${SCRIPT_TMP_DIR}/${host_num}.output" 2>&1 <<-EOF &
 			set -euo pipefail -o errtrace
 			shopt -s inherit_errexit nullglob
-			${DEPLOY_OPTIONS:-}
+			${DEPLOY_EXTRAS:-}
 			DEPLOY_HOST_NAME=$(q "$host_name")
 			DEPLOY_HOST_ADDRESS=$(q "$host_address")
 			DEPLOY_HOST_NUM=$(q "$host_num")
@@ -260,6 +266,17 @@ get_function_body() {
 	type "$1" | tail -n +4 | head -n -1
 }
 
+add_deployment_variables() {
+	declare options; options=$(GET_OPTS_PREFIX="DEPLOY" get_opts "$@")
+	DEPLOY_EXTRAS="${DEPLOY_EXTRAS}"$'\n'"${options}"
+}
+
+add_deployment_function() {
+	declare fn_name=$1
+	declare fn; fn=$(type "$fn_name" | tail -n +2)
+	DEPLOY_EXTRAS="${DEPLOY_EXTRAS}"$'\n'"${fn}"
+}
+
 main() {
 	trap 'on_error "${BASH_SOURCE[0]}:${LINENO}"' ERR
 	trap on_exit EXIT
@@ -281,14 +298,14 @@ main() {
 		;;
 		esac
 	done
-	DEPLOY_OPTIONS=$(GET_OPTS_PREFIX="DEPLOY" get_opts "$@")
+	add_deployment_variables "$@"
 	if [ "$opt_format" = "shell" ]; then
 		#shellcheck disable=SC1090
 		source "$opt_input"
 	elif [ "$opt_format" = "yaml" ]; then
 		deploy_from_yaml "$opt_input"
 	else
-		ERR_MSG="Wrong deployment format: ${opt_format}"
+		echo "Wrong deployment format: ${opt_format}" >&2
 		return 1
 	fi
 }

@@ -6,6 +6,14 @@ q() {
 	printf "%q" "$*"
 }
 
+find_in_output() {
+	declare text=$1
+	if ! echo "$output" | grep "$text" >/dev/null; then
+		echo "Failed to find \"${text}\" in output"
+		return 1
+	fi
+}
+
 setup_file() {
 	mkdir "${BATS_RUN_TMPDIR}/keys"
 	ssh-keygen -t rsa -N "" -C "deploy-sh-tests" -f "${BATS_RUN_TMPDIR}/keys/id_rsa"
@@ -60,12 +68,27 @@ function simple_command { #@test
 	run -0 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE"
 	declare i
 	for i in {1..3}; do
-		declare text="running-on-localhost${i}"
-		if ! echo "$output" | grep "$text" >/dev/null; then
-			echo "Failed to find \"${text}\" in output"
-			return 1
-		fi
+		find_in_output "running-on-localhost${i}"
 	done
+}
+
+function added_extras() { #@test
+	cat >> "$TEST_INPUT_FILE" <<-"EOF"
+		extra_function() {
+			echo "extra-function-launched"
+		}
+		add_deployment_function extra_function
+		add_deployment_variables testvar testvar-value
+		run_task \
+			name "Run extra function" \
+			script "extra_function"
+		run_task \
+			name "Show extra variable" \
+			script "echo \"\$DEPLOY_TESTVAR\""
+	EOF
+	run -0 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE"
+	find_in_output "testvar-value"
+	find_in_output "extra-function-launched"
 }
 
 function parallel_running { #@test
@@ -143,16 +166,8 @@ function release_management { #@test
 			script "rm -rf /tmp/code"
 	EOF
 	run -0 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE" release_dir /tmp/code/releases/3  releases_keep 2
-	declare text="Current: /tmp/code/releases/3"
-	if ! echo "$output" | grep "$text" >/dev/null; then
-		echo "Failed to find \"${text}\" in output"
-		return 1
-	fi
-	declare text="Releases: 2"
-	if ! echo "$output" | grep "$text" >/dev/null; then
-		echo "Failed to find \"${text}\" in output"
-		return 1
-	fi
+	find_in_output "Current: /tmp/code/releases/3"
+	find_in_output "Releases: 2"
 }
 
 function forced_fail { #@test
@@ -213,16 +228,8 @@ EOF
     script: rm -rf /tmp/code
 EOF
 	run -0 "$TEST_SCRIPT" --format yaml -f "$TEST_INPUT_FILE" release_dir /tmp/code/releases/3  releases_keep 2
-	declare text="Current: /tmp/code/releases/3"
-	if ! echo "$output" | grep "$text" >/dev/null; then
-		echo "Failed to find \"${text}\" in output"
-		return 1
-	fi
-	declare text="Releases: 2"
-	if ! echo "$output" | grep "$text" >/dev/null; then
-		echo "Failed to find \"${text}\" in output"
-		return 1
-	fi
+	find_in_output "Current: /tmp/code/releases/3"
+	find_in_output "Releases: 2"
 }
 
 function yaml_run_once { #@test
