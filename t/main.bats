@@ -6,12 +6,16 @@ q() {
 	printf "%q" "$*"
 }
 
-find_in_output() {
-	declare text=$1
-	if ! echo "$output" | grep "$text" >/dev/null; then
-		echo "Failed to find \"${text}\" in output"
+find_in_text() {
+	declare text=$1 phrase=$2
+	if ! echo "$text" | grep "$phrase" >/dev/null; then
+		echo "Failed to find \"${phrase}\" in output"
 		return 1
 	fi
+}
+
+find_in_output() {
+	find_in_text "$output" "$1"
 }
 
 setup_file() {
@@ -38,6 +42,7 @@ teardown_file() {
 setup() {
 	mkdir -p "${BATS_TEST_TMPDIR}"
 	export TEST_SCRIPT=$(realpath "${BATS_TEST_DIRNAME}/../deploy.sh")
+	export TEST_LOG_FILE="${BATS_TEST_DIRNAME}/logfile"
 	export TEST_INPUT_FILE="${BATS_TEST_TMPDIR}/script"
 	export DEPLOY_SSH_CONFIG="\
 StrictHostKeyChecking no
@@ -55,7 +60,7 @@ IdentityFile ${BATS_RUN_TMPDIR}/keys/id_rsa"
 }
 
 teardown() {
-	rm -f "$TEST_INPUT_FILE"
+	rm -f "$TEST_INPUT_FILE" "$TEST_LOG_FILE"
 }
 
 function simple_command { #@test
@@ -64,10 +69,12 @@ function simple_command { #@test
 			name "Test" \
 			script "echo running-on-\${DEPLOY_HOST_NAME}"
 	EOF
-	run -0 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE"
+	run -0 "$TEST_SCRIPT" --logfile "$TEST_LOG_FILE" -f "$TEST_INPUT_FILE"
 	declare i
 	for i in {1..3}; do
-		find_in_output "running-on-localhost${i}"
+		declare phrase="running-on-localhost${i}"
+		find_in_output "$phrase"
+		find_in_text "$(cat "$TEST_LOG_FILE")" "$phrase"
 	done
 }
 

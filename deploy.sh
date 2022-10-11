@@ -13,14 +13,28 @@
 set -euo pipefail -o errtrace
 shopt -s inherit_errexit nullglob
 
+DEPLOY_DEFAULT_HOSTS=""
+: "${DEPLOY_SSH_CONFIG:=}"
+
+# Internally used global variables. Do not assign them here.
 SCRIPT_TMP_DIR=""
 ERR_MSG=""
-DEPLOY_DEFAULT_HOSTS=""
 DEPLOY_EXTRAS=""
-: "${DEPLOY_SSH_CONFIG:=}"
+DEPLOY_LOG_FILE=""
 
 q() {
 	printf '%q' "$*"
+}
+
+log() {
+	if [ -n "$DEPLOY_LOG_FILE" ]; then
+		tee -a "$DEPLOY_LOG_FILE"
+	else
+		declare line
+		while read -r line; do
+			echo "$line"
+		done
+	fi
 }
 
 on_error() {
@@ -225,17 +239,22 @@ report_jobs() {
 	host_num=0
 	while read -r host_name host_address; do
 		declare exit_code
-		echo "Host: ${host_name} Address: ${host_address}" | indent "  "
+		echo "Host: ${host_name} Address: ${host_address}" | indent "  " | log
 		exit_code=$(cat "${SCRIPT_TMP_DIR}/${host_num}.status")
 		if [ "$exit_code" != 0 ]; then
 			errors="Host ${host_name} failed with exit code ${exit_code}"$'\n'"${errors}"
 		fi
-		indent "    " < "${SCRIPT_TMP_DIR}/${host_num}.output"
+		# Remove problematic escape codes
+		# https://stackoverflow.com/a/43627833
+		indent "    " < "${SCRIPT_TMP_DIR}/${host_num}.output" \
+			| sed "s,\x1B\[[0-9;]*[a-zA-Z],,g" \
+			| log
 		host_num=$((host_num + 1))
 	done <<< "$hosts"
 	if [ -n "$errors" ]; then
-		ERR_MSG="-------------------------------------------------------------------------------"
-		ERR_MSG="$ERR_MSG"$'\n'"$errors"
+		echo "-------------------------------------------------------------------------------" | log
+		echo "$errors" | log
+		ERR_MSG="Deployment failed"
 		return 1
 	fi
 }
@@ -260,7 +279,7 @@ run_task() {
 		OPT_SCRIPT=$(type "$OPT_FUNCTION" | tail -n +4 | head -n -1)
 	fi
 	declare timestamp; timestamp=$(date +"%Y-%m-%d %H:%M:%S")
-	echo "${timestamp} Step: ${OPT_NAME}"
+	echo "${timestamp} Step: ${OPT_NAME}" | log
 	# It can't be done in subshell, because Bash needs to own job IDs.
 	start_jobs "$OPT_HOSTS" > "${SCRIPT_TMP_DIR}/jobs"
 	declare host_jobs
@@ -284,6 +303,18 @@ add_deployment_function() {
 	DEPLOY_EXTRAS="${DEPLOY_EXTRAS}"$'\n'"${fn}"
 }
 
+lock_log_file() {
+	declare log_file=$1 lock_fd
+	if [ -n "$DEPLOY_LOG_FILE" ]; then
+		return 0
+	fi
+	DEPLOY_LOG_FILE=$log_file
+	exec {lock_fd}<>"$DEPLOY_LOG_FILE"
+	ERR_MSG="Failed to acquire log file lock. Check, if concurrent deployments are running."
+	flock -n "$lock_fd"
+	ERR_MSG=""
+}
+
 parse_arguments() {
 	declare opt_format="shell" opt_input=""
 	while [ "$#" != 0 ]; do
@@ -298,13 +329,17 @@ parse_arguments() {
 			opt_format=$1
 			shift
 		;;
+		--logfile)
+			shift
+			lock_log_file "$1"
+			shift
+		;;
 		*)
 			break
 		;;
 		esac
 	done
 	add_deployment_variables "$@"
-	declare fn
 	if command -v "deploy_from_${opt_format}" >/dev/null; then
 		"deploy_from_${opt_format}" "$opt_input"
 	else
@@ -323,6 +358,7 @@ main() {
 		rsync_git_repository
 		remove_old_releases
 	)
+	declare fn
 	for fn in "${send_functions[@]}"; do
 		add_deployment_function "$fn"
 	done
