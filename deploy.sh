@@ -61,6 +61,13 @@ yaml_to_json() {
 	python3 -c "$script"
 }
 
+deploy_from_shell() {
+	declare input=$1
+	cat > "${SCRIPT_TMP_DIR}/ssh_config" <<<"$DEPLOY_SSH_CONFIG"
+	#shellcheck disable=SC1090
+	source "$input"
+}
+
 deploy_from_yaml() {
 	declare input=$1 steps_query base64_steps hosts ssh_config
 	input=$(yaml_to_json < "$input")
@@ -269,9 +276,7 @@ add_deployment_function() {
 	DEPLOY_EXTRAS="${DEPLOY_EXTRAS}"$'\n'"${fn}"
 }
 
-main() {
-	trap 'on_error "${BASH_SOURCE[0]}:${LINENO}"' ERR
-	trap on_exit EXIT
+parse_arguments() {
 	declare opt_format="shell" opt_input=""
 	while [ "$#" != 0 ]; do
 		case "$1" in
@@ -292,20 +297,30 @@ main() {
 	done
 	add_deployment_variables "$@"
 	declare fn
-	for fn in q exec_ssh rsync_git_repository remove_old_releases; do
-		add_deployment_function "$fn"
-	done
 	SCRIPT_TMP_DIR=$(mktemp -d -t deploy-sh.XXXXXXXX)
 	if [ "$opt_format" = "shell" ]; then
-		cat > "${SCRIPT_TMP_DIR}/ssh_config" <<<"$DEPLOY_SSH_CONFIG"
-		#shellcheck disable=SC1090
-		source "$opt_input"
+		deploy_from_shell "$opt_input"
 	elif [ "$opt_format" = "yaml" ]; then
 		deploy_from_yaml "$opt_input"
 	else
 		echo "Wrong deployment format: ${opt_format}" >&2
 		return 1
 	fi
+}
+
+main() {
+	trap 'on_error "${BASH_SOURCE[0]}:${LINENO}"' ERR
+	trap on_exit EXIT
+	declare send_functions=(
+		q
+		exec_ssh
+		rsync_git_repository
+		remove_old_releases
+	)
+	for fn in "${send_functions[@]}"; do
+		add_deployment_function "$fn"
+	done
+	parse_arguments "$@"
 }
 
 main "$@"
