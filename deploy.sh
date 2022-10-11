@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+################################################################################
+# Self-contained SSH deployment script leveraging existing system utilities.
+#
+# YAML related functions:
+#   - deploy_from_yaml
+#   - jq_add_field
+#   - yaml_to_json
+################################################################################
 #shellcheck disable=SC2128
 # SC2128: Expanding an array without an index only gives the first element.
 
@@ -297,11 +305,8 @@ parse_arguments() {
 	done
 	add_deployment_variables "$@"
 	declare fn
-	SCRIPT_TMP_DIR=$(mktemp -d -t deploy-sh.XXXXXXXX)
-	if [ "$opt_format" = "shell" ]; then
-		deploy_from_shell "$opt_input"
-	elif [ "$opt_format" = "yaml" ]; then
-		deploy_from_yaml "$opt_input"
+	if command -v "deploy_from_${opt_format}" >/dev/null; then
+		"deploy_from_${opt_format}" "$opt_input"
 	else
 		echo "Wrong deployment format: ${opt_format}" >&2
 		return 1
@@ -311,6 +316,7 @@ parse_arguments() {
 main() {
 	trap 'on_error "${BASH_SOURCE[0]}:${LINENO}"' ERR
 	trap on_exit EXIT
+	SCRIPT_TMP_DIR=$(mktemp -d -t deploy-sh.XXXXXXXX)
 	declare send_functions=(
 		q
 		exec_ssh
