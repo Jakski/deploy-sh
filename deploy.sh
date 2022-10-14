@@ -206,7 +206,11 @@ remove_old_releases() {
 }
 
 start_jobs() {
-	declare hosts=$1 host_num=0 host_name host_address
+	declare is_local=$1 hosts=$2 host_num=0 host_name host_address extra_cmds=""
+	declare exec_func="exec_ssh"
+	if [ "$is_local" = 1 ]; then
+		exec_func="exec_bash"
+	fi
 	while read -r host_name host_address; do
 		"$exec_func" "$host_num" "$host_address" >"${SCRIPT_TMP_DIR}/${host_num}.output" 2>&1 <<-EOF &
 			set -euo pipefail -o errtrace
@@ -215,6 +219,7 @@ start_jobs() {
 			DEPLOY_HOST_NAME=$(q "$host_name")
 			DEPLOY_HOST_ADDRESS=$(q "$host_address")
 			DEPLOY_HOST_NUM=$(q "$host_num")
+			${extra_cmds}
 			${OPT_SCRIPT:-}
 		EOF
 		echo "$!"
@@ -260,6 +265,7 @@ report_jobs() {
 }
 
 run_task() {
+	declare OPT_LOCAL=0
 	eval "$(get_opts "$@")"
 	: "${OPT_NAME:?"Step's name must be provided"}"
 	if [ -z "${OPT_HOSTS:-}" ]; then
@@ -270,18 +276,10 @@ run_task() {
 			declare OPT_HOSTS=$DEPLOY_DEFAULT_HOSTS
 		fi
 	fi
-	declare exec_func="exec_ssh"
-	if [ "${OPT_LOCAL:-0}" = 1 ]; then
-		exec_func="exec_bash"
-	fi
-	if [ -n "${OPT_FUNCTION:-}" ]; then
-		declare OPT_SCRIPT
-		OPT_SCRIPT=$(type "$OPT_FUNCTION" | tail -n +4 | head -n -1)
-	fi
 	declare timestamp; timestamp=$(date +"%Y-%m-%d %H:%M:%S")
 	echo "${timestamp} Step: ${OPT_NAME}" | log
 	# It can't be done in subshell, because Bash needs to own job IDs.
-	start_jobs "$OPT_HOSTS" > "${SCRIPT_TMP_DIR}/jobs"
+	start_jobs "$OPT_LOCAL" "$OPT_HOSTS" > "${SCRIPT_TMP_DIR}/jobs"
 	declare host_jobs
 	mapfile -d "" host_jobs < "${SCRIPT_TMP_DIR}/jobs"
 	wait_for_jobs "$OPT_HOSTS" "$host_jobs"
