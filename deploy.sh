@@ -27,10 +27,10 @@ q() {
 }
 
 log() {
+	declare line
 	if [ -n "$DEPLOY_LOG_FILE" ]; then
 		tee -a "$DEPLOY_LOG_FILE"
 	else
-		declare line
 		while read -r line; do
 			echo "$line"
 		done
@@ -38,7 +38,9 @@ log() {
 }
 
 on_error() {
-	declare exit_code=$? cmd=$BASH_COMMAND
+	declare \
+		exit_code=$? \
+		cmd=$BASH_COMMAND
 	if [ -n "$ERR_MSG" ]; then
 		echo "$ERR_MSG" >&2
 	else
@@ -55,9 +57,12 @@ on_exit() {
 
 # Render "declare key=value" pairs of options suitable for sourcing in shell
 get_opts() {
-	declare prefix=${GET_OPTS_PREFIX:-"OPT"}
+	declare \
+		prefix=${GET_OPTS_PREFIX:-"OPT"} \
+		name \
+		value
 	while [ "$#" != 0 ]; do
-		declare name=$1 value=$2
+		name=$1 value=$2
 		name="${prefix}_${name^^}"
 		shift 2
 		echo "declare $(printf '%q' "$name")=$(printf '%q' "$value")"
@@ -65,7 +70,9 @@ get_opts() {
 }
 
 jq_add_field() {
-	declare name=$1 default=${2:-}
+	declare \
+		name=$1 \
+		default=${2:-}
 	if [ -z "$default" ]; then
 		echo -n "(if has(\"${name}\") then .${name} else error(\"field ${name} is required\") end)"
 	else
@@ -91,7 +98,18 @@ deploy_from_shell() {
 }
 
 deploy_from_yaml() {
-	declare input=$1 steps_query base64_steps hosts ssh_config
+	declare \
+		input=$1 \
+		steps_query \
+		base64_steps \
+		hosts \
+		ssh_config \
+		step_name \
+		step_script \
+		step_run_once \
+		targets \
+		targets_array
+	declare -a args=()
 	input=$(yaml_to_json < "$input")
 	hosts=$(jq -er '.hosts | to_entries[] | (.key|tostring) + " " + (.value|tostring)' <<< "$input")
 	ssh_config=$(jq -r ".ssh_config" <<< "$input")
@@ -110,19 +128,16 @@ deploy_from_yaml() {
 		| @base64
 	EOF
 	base64_steps=$(jq -r "$steps_query" <<< "$input")
-	declare step_name step_script step_run_once
 	while read -r step_name; do
 		step_name=$(echo "$step_name" | base64 -d)
 		read -r step_script; step_script=$(echo "$step_script" | base64 -d)
 		read -r step_run_once; step_run_once=$(echo "$step_run_once" | base64 -d)
 		read -r step_local; step_local=$(echo "$step_local" | base64 -d)
-		declare targets="$hosts"
+		targets="$hosts"
 		if [ "$step_run_once" = "true" ]; then
-			declare targets_array
 			mapfile -t targets_array <<< "$targets"
 			targets=${targets_array[0]}
 		fi
-		declare args=()
 		args+=(
 			name "$step_name"
 			hosts "$targets"
@@ -155,7 +170,9 @@ exec_bash() {
 }
 
 indent() {
-	declare padding=$1 line
+	declare \
+		padding=$1 \
+		line
 	while read -r line; do
 		echo "${padding}${line}"
 	done
@@ -163,10 +180,12 @@ indent() {
 
 rsync_git_repository() {
 	: "${DEPLOY_RELEASE_DIR:?}"
-	declare files revision
+	declare \
+		files \
+		revision \
+		config_file
 	files=$(git ls-tree -r --name-only HEAD)
 	revision=$(git rev-parse HEAD)
-	declare config_file
 	config_file=$(printf "%s" "${SCRIPT_TMP_DIR}/ssh_config")
 	rsync \
 		--rsh "ssh -F ${config_file}" \
@@ -184,7 +203,11 @@ rsync_git_repository() {
 
 remove_old_releases() {
 	: "${DEPLOY_RELEASE_DIR:?}"
-	declare releases_dir release_dir old_release release_num=0
+	declare \
+		release_num=0 \
+		releases_dir \
+		release_dir \
+		old_release
 	releases_dir=$(realpath "${DEPLOY_RELEASE_DIR}/..")
 	release_dir=$(realpath "$DEPLOY_RELEASE_DIR")
 	while read -r old_release; do
@@ -206,8 +229,14 @@ remove_old_releases() {
 }
 
 start_jobs() {
-	declare is_local=$1 hosts=$2 host_num=0 host_name host_address extra_cmds=""
-	declare exec_func="exec_ssh"
+	declare \
+		is_local=$1 \
+		hosts=$2 \
+		host_num=0 \
+		extra_cmds="" \
+		exec_func="exec_ssh" \
+		host_name \
+		host_address
 	if [ "$is_local" = 1 ]; then
 		exec_func="exec_bash"
 	fi
@@ -228,9 +257,14 @@ start_jobs() {
 }
 
 wait_for_jobs() {
-	declare hosts=$1 host_jobs=$2 host_num=0
+	declare \
+		hosts=$1 \
+		host_jobs=$2 \
+		host_num=0 \
+		job_status \
+		job_id
 	while read -r host_name host_address; do
-		declare job_status=0 job_id
+		job_status=0
 		job_id=$(head -n 1 <<< "$host_jobs")
 		host_jobs=$(tail -n +2 <<< "$host_jobs")
 		wait "$job_id" || job_status=$?
@@ -240,10 +274,12 @@ wait_for_jobs() {
 }
 
 report_jobs() {
-	declare hosts=$1 errors=""
+	declare \
+		hosts=$1 \
+		errors="" \
+		exit_code
 	host_num=0
 	while read -r host_name host_address; do
-		declare exit_code
 		echo "Host: ${host_name} Address: ${host_address}" | indent "  " | log
 		exit_code=$(cat "${SCRIPT_TMP_DIR}/${host_num}.status")
 		if [ "$exit_code" != 0 ]; then
@@ -265,7 +301,11 @@ report_jobs() {
 }
 
 run_task() {
-	declare OPT_LOCAL=0
+	declare \
+		OPT_LOCAL=0 \
+		OPT_HOSTS="" \
+		timestamp \
+		host_jobs
 	eval "$(get_opts "$@")"
 	: "${OPT_NAME:?"Step's name must be provided"}"
 	if [ -z "${OPT_HOSTS:-}" ]; then
@@ -273,14 +313,13 @@ run_task() {
 			ERR_MSG="Target hosts must be provided"
 			return 1
 		else
-			declare OPT_HOSTS=$DEPLOY_DEFAULT_HOSTS
+			OPT_HOSTS=$DEPLOY_DEFAULT_HOSTS
 		fi
 	fi
-	declare timestamp; timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+	timestamp=$(date +"%Y-%m-%d %H:%M:%S")
 	echo "${timestamp} Step: ${OPT_NAME}" | log
 	# It can't be done in subshell, because Bash needs to own job IDs.
 	start_jobs "$OPT_LOCAL" "$OPT_HOSTS" > "${SCRIPT_TMP_DIR}/jobs"
-	declare host_jobs
 	mapfile -d "" host_jobs < "${SCRIPT_TMP_DIR}/jobs"
 	wait_for_jobs "$OPT_HOSTS" "$host_jobs"
 	report_jobs "$OPT_HOSTS"
@@ -291,18 +330,23 @@ get_function_body() {
 }
 
 add_deployment_variables() {
-	declare options; options=$(GET_OPTS_PREFIX="DEPLOY" get_opts "$@")
+	declare options
+	options=$(GET_OPTS_PREFIX="DEPLOY" get_opts "$@")
 	DEPLOY_EXTRAS="${DEPLOY_EXTRAS}"$'\n'"${options}"
 }
 
 add_deployment_function() {
-	declare fn_name=$1
-	declare fn; fn=$(type "$fn_name" | tail -n +2)
+	declare \
+		fn_name=$1 \
+		fn
+	fn=$(type "$fn_name" | tail -n +2)
 	DEPLOY_EXTRAS="${DEPLOY_EXTRAS}"$'\n'"${fn}"
 }
 
 lock_log_file() {
-	declare log_file=$1 lock_fd
+	declare \
+		log_file=$1 \
+		lock_fd
 	if [ -n "$DEPLOY_LOG_FILE" ]; then
 		return 0
 	fi
@@ -314,7 +358,9 @@ lock_log_file() {
 }
 
 parse_arguments() {
-	declare opt_format="shell" opt_input=""
+	declare \
+		opt_format="shell" \
+		opt_input=""
 	while [ "$#" != 0 ]; do
 		case "$1" in
 		-f|--file)
@@ -347,16 +393,17 @@ parse_arguments() {
 }
 
 main() {
+	declare fn
+	declare -a send_functions
 	trap 'on_error "${BASH_SOURCE[0]}:${LINENO}"' ERR
 	trap on_exit EXIT
 	SCRIPT_TMP_DIR=$(mktemp -d -t deploy-sh.XXXXXXXX)
-	declare send_functions=(
+	send_functions=(
 		q
 		exec_ssh
 		rsync_git_repository
 		remove_old_releases
 	)
-	declare fn
 	for fn in "${send_functions[@]}"; do
 		add_deployment_function "$fn"
 	done
