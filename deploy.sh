@@ -2,10 +2,14 @@
 ################################################################################
 # Self-contained SSH deployment script leveraging existing system utilities.
 #
-# YAML related functions:
-#   - deploy_from_yaml
-#   - jq_add_field
-#   - yaml_to_json
+# YAML support requires additional Perl module. libyaml-perl on Debian.
+# Use *_hook functions to customize script behaviour.
+#
+# Variables available during deployment:
+#   - DEPLOY_HOST_NAME - First field of host definition.
+#   - DEPLOY_HOST_ADDRESS - Second field of host definition.
+#   - DEPLOY_HOST_NUM - Host's number. It may change between tasks.
+#   - DEPLOY_RELEASE_DIR - Target release directory relative to user's home.
 ################################################################################
 #shellcheck disable=SC2128
 # SC2128: Expanding an array without an index only gives the first element.
@@ -19,8 +23,41 @@ DEPLOY_DEFAULT_HOSTS=""
 # Internally used global variables. Do not assign them here.
 SCRIPT_TMP_DIR=""
 ERR_MSG=""
-DEPLOY_EXTRAS=""
+DEPLOY_APP_NAME=""
+DEPLOY_EXTRA=""
 DEPLOY_LOG_FILE=""
+
+start_jobs_hook() {
+	declare extra
+	if [ "$is_local" = 0 ]; then
+mapfile -d "" extra <<"EOF"
+mkdir -p "$DEPLOY_RELEASE_DIR"
+cd "$DEPLOY_RELEASE_DIR"
+EOF
+		DEPLOY_TASK_EXTRA="${DEPLOY_TASK_EXTRA}${extra}"
+	fi
+}
+
+parse_arguments_hook() {
+	:
+}
+
+main_hook() {
+	declare \
+		fn \
+		timestamp
+	for fn in \
+		q \
+		exec_ssh \
+		link_release \
+		rsync_git_repository \
+		remove_old_releases
+	do
+		add_deployment_function "$fn"
+	done
+	timestamp=$(date +%s)
+	add_deployment_variables release_dir "${DEPLOY_APP_NAME:-"app"}/${timestamp}"
+}
 
 q() {
 	printf '%q' "$*"
@@ -69,87 +106,58 @@ get_opts() {
 	done
 }
 
-jq_add_field() {
-	declare \
-		name=$1 \
-		default=${2:-}
-	if [ -z "$default" ]; then
-		echo -n "(if has(\"${name}\") then .${name} else error(\"field ${name} is required\") end)"
-	else
-		echo -n "(if has(\"${name}\") then .${name} else ${default} end)"
-	fi
-}
-
-yaml_to_json() {
-	declare script
-	mapfile -d "" script <<-EOF
-		from ruamel import yaml
-		import json, sys
-		json.dump(yaml.safe_load(sys.stdin), sys.stdout)
-	EOF
-	python3 -c "$script"
-}
-
 deploy_from_shell() {
 	declare input=$1
-	cat > "${SCRIPT_TMP_DIR}/ssh_config" <<<"$DEPLOY_SSH_CONFIG"
 	#shellcheck disable=SC1090
 	source "$input"
 }
 
 deploy_from_yaml() {
+	: "${DEPLOY_APP_NAME:?"Application name is required"}"
 	declare \
 		input=$1 \
-		steps_query \
-		base64_steps \
-		hosts \
-		ssh_config \
-		step_name \
-		step_script \
-		step_run_once \
-		targets \
-		targets_array
-	declare -a args=()
-	input=$(yaml_to_json < "$input")
-	hosts=$(jq -er '.hosts | to_entries[] | (.key|tostring) + " " + (.value|tostring)' <<< "$input")
-	ssh_config=$(jq -r ".ssh_config" <<< "$input")
-	if [ -n "$ssh_config" ]; then
-		DEPLOY_SSH_CONFIG=$ssh_config
-	fi
-	cat > "${SCRIPT_TMP_DIR}/ssh_config" <<<"$DEPLOY_SSH_CONFIG"
-	mapfile -d "" steps_query <<-EOF
-		.deploy[]
-		| [
-				$(jq_add_field "name"),
-				$(jq_add_field "script"),
-				$(jq_add_field "run_once" "false"),
-				$(jq_add_field "local" "false")
-			][]
-		| @base64
-	EOF
-	base64_steps=$(jq -r "$steps_query" <<< "$input")
-	while read -r step_name; do
-		step_name=$(echo "$step_name" | base64 -d)
-		read -r step_script; step_script=$(echo "$step_script" | base64 -d)
-		read -r step_run_once; step_run_once=$(echo "$step_run_once" | base64 -d)
-		read -r step_local; step_local=$(echo "$step_local" | base64 -d)
-		targets="$hosts"
-		if [ "$step_run_once" = "true" ]; then
-			mapfile -t targets_array <<< "$targets"
-			targets=${targets_array[0]}
-		fi
-		args+=(
-			name "$step_name"
-			hosts "$targets"
-			script "$step_script"
-		)
-		if [ "$step_local" = "true" ]; then
-			args+=(local 1)
-		else
-			args+=(local 0)
-		fi
-		run_task "${args[@]}"
-	done <<< "$base64_steps"
+		converter \
+		plan
+mapfile -d "" converter <<"EOF"
+use strict;
+use YAML;
+$YAML::XS::LoadBlessed = 0;
+use warnings;
+
+sub quote {
+	my ($str) = @_;
+	($str) =~ s/'/'"'"'/g;
+	return "'${str}'";
+}
+my $input;
+{
+	local $/ = undef;
+	$input = <STDIN>;
+}
+$input = Load($input);
+if (exists($input->{"hosts"})) {
+	my @host_names = sort(keys(%{$input->{"hosts"}}));
+	my @hosts = ();
+	foreach (@host_names) {
+		push(@hosts, $_ . " " . $input->{"hosts"}->{$_});
+	}
+	print "declare DEPLOY_DEFAULT_HOSTS=" . quote(join("\n", @hosts)) . "\n";
+}
+print "declare DEPLOY_SSH_CONFIG=" . quote($input->{"ssh_config"} // "") . "\n";
+$input = $input->{"applications"} or die ".applications must be defined.";
+$input = $input->{$ARGV[0]} or die "${ARGV[0]} application is not defined.";
+$input = $input->{"deploy"} 
+	or die "Deployment steps(.applications.${ARGV[0]}.deploy) are not defined.";
+foreach (@$input) {
+	print "run_task";
+	while (my ($key, $value) = each %$_) {
+		print " " . quote($key) . " " . quote($value);
+	}
+	print "\n";
+}
+EOF
+	plan=$(perl <(echo "$converter") "$DEPLOY_APP_NAME" < "$input")
+	eval "$plan"
 }
 
 #shellcheck disable=SC2120
@@ -178,6 +186,11 @@ indent() {
 	done
 }
 
+link_release() {
+	: "${DEPLOY_RELEASE_DIR:?}"
+	ln -Tsvf ~/"${DEPLOY_RELEASE_DIR}" ~/"${DEPLOY_RELEASE_DIR}/../current"
+}
+
 rsync_git_repository() {
 	: "${DEPLOY_RELEASE_DIR:?}"
 	declare \
@@ -186,7 +199,14 @@ rsync_git_repository() {
 		config_file
 	files=$(git ls-tree -r --name-only HEAD)
 	revision=$(git rev-parse HEAD)
-	config_file=$(printf "%s" "${SCRIPT_TMP_DIR}/ssh_config")
+	config_file=$(q "${SCRIPT_TMP_DIR}/ssh_config")
+	(
+		exec_ssh <<-EOF
+			mkdir -p $(q "$DEPLOY_RELEASE_DIR")
+			cd $(q "$DEPLOY_RELEASE_DIR")
+			echo $(q "$revision") > REVISION
+		EOF
+	)
 	rsync \
 		--rsh "ssh -F ${config_file}" \
 		--archive \
@@ -195,10 +215,6 @@ rsync_git_repository() {
 		--files-from <(echo "$files") \
 		. \
 		"${DEPLOY_HOST_ADDRESS}:${DEPLOY_RELEASE_DIR}"
-	exec_ssh <<-EOF
-		cd $(q "$DEPLOY_RELEASE_DIR")
-		echo $(q "$revision") > REVISION
-	EOF
 }
 
 remove_old_releases() {
@@ -208,8 +224,8 @@ remove_old_releases() {
 		releases_dir \
 		release_dir \
 		old_release
-	releases_dir=$(realpath "${DEPLOY_RELEASE_DIR}/..")
-	release_dir=$(realpath "$DEPLOY_RELEASE_DIR")
+	releases_dir=$(realpath ~/"${DEPLOY_RELEASE_DIR}/..")
+	release_dir=$(realpath ~/"$DEPLOY_RELEASE_DIR")
 	while read -r old_release; do
 		old_release="${releases_dir}/${old_release}"
 		# Omit links in case `current` is used to mark latest release.
@@ -217,7 +233,7 @@ remove_old_releases() {
 			continue
 		fi
 		release_num=$((release_num + 1))
-		if [ "$release_num" -le "${DEPLOY_RELEASES_KEEP:-3}" ]; then
+		if [ "$release_num" -le "${DEPLOY_RELEASES_KEEP:-2}" ]; then
 			continue
 		fi
 		if [ "$old_release" = "$release_dir" ]; then
@@ -231,25 +247,28 @@ remove_old_releases() {
 start_jobs() {
 	declare \
 		is_local=$1 \
-		hosts=$2 \
+		script=$2 \
+		hosts=$3 \
 		host_num=0 \
-		extra_cmds="" \
+		DEPLOY_TASK_EXTRA="" \
 		exec_func="exec_ssh" \
 		host_name \
 		host_address
 	if [ "$is_local" = 1 ]; then
 		exec_func="exec_bash"
 	fi
+	cat > "${SCRIPT_TMP_DIR}/ssh_config" <<<"$DEPLOY_SSH_CONFIG"
+	start_jobs_hook
 	while read -r host_name host_address; do
 		"$exec_func" "$host_num" "$host_address" >"${SCRIPT_TMP_DIR}/${host_num}.output" 2>&1 <<-EOF &
 			set -euo pipefail -o errtrace
 			shopt -s inherit_errexit nullglob
-			${DEPLOY_EXTRAS:-}
 			DEPLOY_HOST_NAME=$(q "$host_name")
 			DEPLOY_HOST_ADDRESS=$(q "$host_address")
 			DEPLOY_HOST_NUM=$(q "$host_num")
-			${extra_cmds}
-			${OPT_SCRIPT:-}
+			${DEPLOY_EXTRA}
+			${DEPLOY_TASK_EXTRA}
+			${script}
 		EOF
 		echo "$!"
 		host_num=$((host_num + 1))
@@ -303,11 +322,17 @@ report_jobs() {
 run_task() {
 	declare \
 		OPT_LOCAL=0 \
+		OPT_RUN_ONCE=0 \
 		OPT_HOSTS="" \
 		timestamp \
 		host_jobs
 	eval "$(get_opts "$@")"
-	: "${OPT_NAME:?"Step's name must be provided"}"
+	if [ "$OPT_LOCAL" = "true" ]; then
+		OPT_LOCAL=1
+	fi
+	: \
+		"${OPT_NAME:?"Step's name must be provided"}" \
+		"${OPT_SCRIPT:?"Step's script must be provided"}"
 	if [ -z "${OPT_HOSTS:-}" ]; then
 		if [ -z "${DEPLOY_DEFAULT_HOSTS:-}" ]; then
 			ERR_MSG="Target hosts must be provided"
@@ -316,10 +341,16 @@ run_task() {
 			OPT_HOSTS=$DEPLOY_DEFAULT_HOSTS
 		fi
 	fi
+	if [ "$OPT_RUN_ONCE" = "true" ]; then
+		OPT_RUN_ONCE=1
+	fi
+	if [ "$OPT_RUN_ONCE" = 1 ]; then
+		read -r OPT_HOSTS <<< "$OPT_HOSTS"
+	fi
 	timestamp=$(date +"%Y-%m-%d %H:%M:%S")
 	echo "${timestamp} Step: ${OPT_NAME}" | log
 	# It can't be done in subshell, because Bash needs to own job IDs.
-	start_jobs "$OPT_LOCAL" "$OPT_HOSTS" > "${SCRIPT_TMP_DIR}/jobs"
+	start_jobs "$OPT_LOCAL" "$OPT_SCRIPT" "$OPT_HOSTS" > "${SCRIPT_TMP_DIR}/jobs"
 	mapfile -d "" host_jobs < "${SCRIPT_TMP_DIR}/jobs"
 	wait_for_jobs "$OPT_HOSTS" "$host_jobs"
 	report_jobs "$OPT_HOSTS"
@@ -332,7 +363,7 @@ get_function_body() {
 add_deployment_variables() {
 	declare options
 	options=$(GET_OPTS_PREFIX="DEPLOY" get_opts "$@")
-	DEPLOY_EXTRAS="${DEPLOY_EXTRAS}"$'\n'"${options}"
+	DEPLOY_EXTRA="${DEPLOY_EXTRA}"$'\n'"${options}"
 }
 
 add_deployment_function() {
@@ -340,7 +371,7 @@ add_deployment_function() {
 		fn_name=$1 \
 		fn
 	fn=$(type "$fn_name" | tail -n +2)
-	DEPLOY_EXTRAS="${DEPLOY_EXTRAS}"$'\n'"${fn}"
+	DEPLOY_EXTRA="${DEPLOY_EXTRA}"$'\n'"${fn}"
 }
 
 lock_log_file() {
@@ -359,23 +390,29 @@ lock_log_file() {
 
 parse_arguments() {
 	declare \
-		opt_format="shell" \
-		opt_input=""
+		OPT_FORMAT="shell" \
+		OPT_INPUT="" \
+		OPT_LOGFILE=""
 	while [ "$#" != 0 ]; do
 		case "$1" in
 		-f|--file)
 			shift
-			opt_input=$1
+			OPT_INPUT=$1
+			shift
+		;;
+		-a|--app)
+			shift
+			DEPLOY_APP_NAME=$1
 			shift
 		;;
 		--format)
 			shift
-			opt_format=$1
+			OPT_FORMAT=$1
 			shift
 		;;
 		--logfile)
 			shift
-			lock_log_file "$1"
+			OPT_LOGFILE=$1
 			shift
 		;;
 		*)
@@ -384,29 +421,31 @@ parse_arguments() {
 		esac
 	done
 	add_deployment_variables "$@"
-	if command -v "deploy_from_${opt_format}" >/dev/null; then
-		"deploy_from_${opt_format}" "$opt_input"
+	if [ -n "$OPT_INPUT" ]; then
+		if [[ $OPT_INPUT == *.yml ]] || [[ $OPT_INPUT == *.yaml ]]; then
+			OPT_FORMAT=yaml
+		else
+			OPT_FORMAT=shell
+		fi
+	fi
+	parse_arguments_hook
+	: "${OPT_INPUT:?"Input file(-f|--file) is required"}"
+	if [ -n "$OPT_LOGFILE" ]; then
+		lock_log_file "$OPT_LOGFILE"
+	fi
+	if command -v "deploy_from_${OPT_FORMAT}" >/dev/null; then
+		"deploy_from_${OPT_FORMAT}" "$OPT_INPUT"
 	else
-		echo "Wrong deployment format: ${opt_format}" >&2
+		echo "Wrong deployment format: ${OPT_FORMAT}" >&2
 		return 1
 	fi
 }
 
 main() {
-	declare fn
-	declare -a send_functions
 	trap 'on_error "${BASH_SOURCE[0]}:${LINENO}"' ERR
 	trap on_exit EXIT
 	SCRIPT_TMP_DIR=$(mktemp -d -t deploy-sh.XXXXXXXX)
-	send_functions=(
-		q
-		exec_ssh
-		rsync_git_repository
-		remove_old_releases
-	)
-	for fn in "${send_functions[@]}"; do
-		add_deployment_function "$fn"
-	done
+	main_hook
 	parse_arguments "$@"
 }
 

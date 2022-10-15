@@ -51,25 +51,51 @@ LogLevel ERROR
 Port 2222
 User tests
 IdentityFile ${BATS_RUN_TMPDIR}/keys/id_rsa"
-	cat > "$TEST_INPUT_FILE" <<-EOF
+	cat > "${TEST_INPUT_FILE}.sh" <<-EOF
 		DEPLOY_DEFAULT_HOSTS="\\
 		localhost1 127.0.0.1
 		localhost2 127.0.0.1
 		localhost3 127.0.0.1"
 	EOF
+mapfile -d "" YAML_BASE_CONFIG <<EOF
+---
+ssh_config: |
+  StrictHostKeyChecking no
+  UserKnownHostsFile /dev/null
+  LogLevel ERROR
+  Port 2222
+  User tests
+  IdentityFile ${BATS_RUN_TMPDIR}/keys/id_rsa
+hosts:
+  localhost1: 127.0.0.1
+EOF
+cat > "${TEST_INPUT_FILE}.yml" <<EOF
+${YAML_BASE_CONFIG}
+applications:
+  app:
+    deploy:
+EOF
+	export YAML_BASE_CONFIG
 }
 
 teardown() {
-	rm -f "$TEST_INPUT_FILE" "$TEST_LOG_FILE"
+	rm -f "${TEST_INPUT_FILE}.sh" "${TEST_INPUT_FILE}.yml" "$TEST_LOG_FILE"
+	ssh \
+		-o StrictHostKeyChecking=no \
+		-o UserKnownHostsFile=/dev/null \
+		-o LogLevel=ERROR \
+		-o IdentityFile="${BATS_RUN_TMPDIR}/keys/id_rsa" \
+		-p 2222 \
+		tests@127.0.0.1 "rm -rf ./*"
 }
 
 function simple_command { #@test
-	cat >> "$TEST_INPUT_FILE" <<-"EOF"
+	cat >> "${TEST_INPUT_FILE}.sh" <<-"EOF"
 		run_task \
 			name "Test" \
 			script "echo running-on-\${DEPLOY_HOST_NAME}"
 	EOF
-	run -0 "$TEST_SCRIPT" --logfile "$TEST_LOG_FILE" -f "$TEST_INPUT_FILE"
+	run -0 "$TEST_SCRIPT" --logfile "$TEST_LOG_FILE" -f "${TEST_INPUT_FILE}.sh"
 	declare i
 	for i in {1..3}; do
 		declare phrase="running-on-localhost${i}"
@@ -79,7 +105,7 @@ function simple_command { #@test
 }
 
 function added_extras() { #@test
-	cat >> "$TEST_INPUT_FILE" <<-"EOF"
+	cat >> "${TEST_INPUT_FILE}.sh" <<-"EOF"
 		extra_function() {
 			echo "extra-function-launched"
 		}
@@ -92,175 +118,139 @@ function added_extras() { #@test
 			name "Show extra variable" \
 			script "echo \"\$DEPLOY_TESTVAR\""
 	EOF
-	run -0 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE"
+	run -0 "$TEST_SCRIPT" -f "${TEST_INPUT_FILE}.sh"
 	find_in_output "testvar-value"
 	find_in_output "extra-function-launched"
 }
 
 function parallel_running { #@test
-	cat >> "$TEST_INPUT_FILE" <<-"EOF"
+	cat >> "${TEST_INPUT_FILE}.sh" <<-"EOF"
 		run_task \
 			name "Create" \
-			script "touch /tmp/host-\${DEPLOY_HOST_NAME}; sleep 0.2; ls /tmp/host-*"
-		run_task \
-			name "Remove" \
-			script "rm /tmp/host-\${DEPLOY_HOST_NAME}"
+			script "touch host-\${DEPLOY_HOST_NAME}; sleep 0.2; ls host-*"
 	EOF
-	run -0 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE"
-	[ "$(echo "$output" | grep "/tmp/host-" | wc -l)" = 9 ]
+	run -0 "$TEST_SCRIPT" -f "${TEST_INPUT_FILE}.sh"
+	[ "$(echo "$output" | grep "host-" | wc -l)" = 9 ]
 }
 
 function upload_release { #@test
-	cat >> "$TEST_INPUT_FILE" <<-"EOF"
+	cat >> "${TEST_INPUT_FILE}.sh" <<-"EOF"
 		DEPLOY_DEFAULT_HOSTS="localhost1 127.0.0.1"
-		run_task \
-			name "Create" \
-			script "mkdir -p /tmp/code"
 		run_task \
 			name "Deploy" \
 			local 1 \
 			script "rsync_git_repository"
 		run_task \
 			name "Show" \
-			script "stat \"\${DEPLOY_RELEASE_DIR}/t/main.bats\""
+			script "stat t/main.bats"
 		run_task \
 			name "Show revision" \
-			script "cat \"\${DEPLOY_RELEASE_DIR}/REVISION\""
-		run_task \
-			name "Remove" \
-			script "rm -rf /tmp/code"
+			script "cat REVISION"
 	EOF
 	declare revision=$(git rev-parse HEAD)
-	run -0 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE" release_dir /tmp/code/1
+	run -0 "$TEST_SCRIPT" -f "${TEST_INPUT_FILE}.sh" release_dir code/1
 	find_in_output "$revision"
 }
 
 function release_management { #@test
-	cat >> "$TEST_INPUT_FILE" <<-"EOF"
+	cat >> "${TEST_INPUT_FILE}.sh" <<-"EOF"
 		DEPLOY_DEFAULT_HOSTS="localhost1 127.0.0.1"
-		run_task \
-			name "Create" \
-			script "mkdir -p /tmp/code/releases"
 		run_task \
 			name "Deploy" \
 			local 1 \
 			script "rsync_git_repository"
 		run_task \
 			name "Verify" \
-			script "stat \"\${DEPLOY_RELEASE_DIR}/t/main.bats\" > /dev/null"
+			script "stat t/main.bats > /dev/null"
 		run_task \
 			name "Link" \
-			script "ln -Tsf \"\${DEPLOY_RELEASE_DIR}\" /tmp/code/current"
+			script "link_release"
 		run_task \
 			name "Remove old" \
 			script "remove_old_releases"
 	EOF
 	declare release_num
 	for release_num in {1..2}; do
-		run -0 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE" release_dir /tmp/code/releases/"$release_num"
+		run -0 "$TEST_SCRIPT" -f "${TEST_INPUT_FILE}.sh" release_dir "code/${release_num}"
 	done
-	cat >> "$TEST_INPUT_FILE" <<-"EOF"
+	cat >> "${TEST_INPUT_FILE}.sh" <<-"EOF"
 		run_task \
 			name "Verify current" \
-			script "stat /tmp/code/current/t/main.bats > /dev/null"
+			script "stat ~/code/current/t/main.bats > /dev/null"
 		run_task \
 			name "Show current" \
-			script "echo -n \"Current: \" && realpath /tmp/code/current"
+			script "echo -n \"Current: \" && basename \"\$(realpath ~/code/current)\""
 		run_task \
 			name "Count releases" \
-			script "echo -n \"Releases: \" && ls -1 /tmp/code/releases | wc -l"
+			script "echo -n \"Releases: \" && ls -1 ~/code | wc -l"
 		run_task \
 			name "Ensure release 2 exists" \
-			script "stat /tmp/code/releases/2 >/dev/null"
-		run_task \
-			name "Remove" \
-			script "rm -rf /tmp/code"
+			script "stat ~/code/2 >/dev/null"
 	EOF
-	run -0 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE" release_dir /tmp/code/releases/3  releases_keep 2
-	find_in_output "Current: /tmp/code/releases/3"
-	find_in_output "Releases: 2"
+	run -0 "$TEST_SCRIPT" -f "${TEST_INPUT_FILE}.sh" release_dir code/3  releases_keep 2
+	find_in_output "Current: 3"
+	find_in_output "Releases: 3"
 }
 
 function forced_fail { #@test
-	cat >> "$TEST_INPUT_FILE" <<-"EOF"
+	cat >> "${TEST_INPUT_FILE}.sh" <<-"EOF"
 		DEPLOY_DEFAULT_HOSTS="localhost1 127.0.0.1"
 		run_task \
 			name "Fail" \
 			script "exit 1"
 	EOF
-	run -1 "$TEST_SCRIPT" -f "$TEST_INPUT_FILE"
+	run -1 "$TEST_SCRIPT" -f "${TEST_INPUT_FILE}.sh"
 }
 
 function yaml_release_management { #@test
-	cat > "$TEST_INPUT_FILE" <<EOF
----
-ssh_config: |
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-  LogLevel ERROR
-  Port 2222
-  User tests
-  IdentityFile ${BATS_RUN_TMPDIR}/keys/id_rsa
-hosts:
-  localhost1: 127.0.0.1
-EOF
-	cat >> "$TEST_INPUT_FILE" <<"EOF"
-deploy:
-  - name: Create
-    script: mkdir -p /tmp/code/releases
-  - name: Deploy
-    local: true
-    script: rsync_git_repository
-  - name: Verify
-    script: stat "${DEPLOY_RELEASE_DIR}/t/main.bats" > /dev/null
-  - name: Link
-    script: ln -Tsf "${DEPLOY_RELEASE_DIR}" /tmp/code/current
-  - name: Remove old
-    script: remove_old_releases
+cat >> "${TEST_INPUT_FILE}.yml" <<"EOF"
+    - name: Deploy
+      local: true
+      script: rsync_git_repository
+    - name: Verify
+      script: stat t/main.bats > /dev/null
+    - name: Link
+      script: link_release
+    - name: Remove old
+      script: remove_old_releases
 EOF
 	declare release_num
 	for release_num in {1..2}; do
-		run -0 "$TEST_SCRIPT" --format yaml -f "$TEST_INPUT_FILE" release_dir /tmp/code/releases/"$release_num"
+		run -0 "$TEST_SCRIPT" -f "${TEST_INPUT_FILE}.yml" -a app release_dir code/"$release_num"
 	done
-	cat >> "$TEST_INPUT_FILE" <<"EOF"
-  - name: Verify current
-    script: stat /tmp/code/current/t/main.bats > /dev/null
-  - name: Show current
-    script: |
-      echo -n "Current: "
-      realpath /tmp/code/current
-  - name: Count releases
-    script: |
-      echo -n "Releases: "
-      ls -1 /tmp/code/releases | wc -l
-  - name: Ensure release 2 exists
-    script: stat /tmp/code/releases/2 >/dev/null
-  - name: Remove
-    script: rm -rf /tmp/code
+	cat >> "${TEST_INPUT_FILE}.yml" <<"EOF"
+    - name: Verify current
+      script: stat ~/code/current/t/main.bats > /dev/null
+    - name: Show current
+      script: |
+        echo -n "Current: "
+        basename "$(realpath ~/code/current)"
+    - name: Count releases
+      script: |
+        echo -n "Releases: "
+        ls -1 ~/code/ | wc -l
+    - name: Ensure release 2 exists
+      script: stat ~/code/2 >/dev/null
 EOF
-	run -0 "$TEST_SCRIPT" --format yaml -f "$TEST_INPUT_FILE" release_dir /tmp/code/releases/3  releases_keep 2
-	find_in_output "Current: /tmp/code/releases/3"
-	find_in_output "Releases: 2"
+	run -0 "$TEST_SCRIPT" -f "${TEST_INPUT_FILE}.yml" -a app release_dir code/3  releases_keep 2
+	find_in_output "Current: 3"
+	find_in_output "Releases: 3"
 }
 
 function yaml_run_once { #@test
-	cat > "$TEST_INPUT_FILE" <<EOF
----
-ssh_config: |
-  StrictHostKeyChecking no
-  UserKnownHostsFile /dev/null
-  LogLevel ERROR
-  Port 2222
-  User tests
-  IdentityFile ${BATS_RUN_TMPDIR}/keys/id_rsa
-hosts:
-  localhost1: 127.0.0.1
+cat > "${TEST_INPUT_FILE}.yml" <<EOF
+${YAML_BASE_CONFIG}
   localhost2: 127.0.0.1
-deploy:
-  - name: Run once
-    script: 'echo "running-once-on: \${DEPLOY_HOST_NAME}"'
-    run_once: true
+applications:
+  app:
+    deploy:
+    - name: Running twice
+      script: 'echo "running-twice"'
+    - name: Running once
+      script: 'echo "running-once"'
+      run_once: true
 EOF
-	run -0 "$TEST_SCRIPT" --format yaml -f "$TEST_INPUT_FILE"
-	[ "$(echo "$output" | grep -E '^\s*running-once-on: localhost1$' | wc -l)" = 1 ]
+	run -0 "$TEST_SCRIPT" -f "${TEST_INPUT_FILE}.yml" -a app
+	[ "$(echo "$output" | grep -E '^\s*running-twice' | wc -l)" = 2 ]
+	[ "$(echo "$output" | grep -E '^\s*running-once' | wc -l)" = 1 ]
 }
