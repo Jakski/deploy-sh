@@ -139,10 +139,13 @@ function upload_release { #@test
 		run_task \
 			name "Deploy" \
 			local 1 \
-			script "rsync_git_repository"
+			script "upload_release"
 		run_task \
 			name "Show" \
 			script "stat t/main.bats"
+		run_task \
+			name "Ensure missing .git directory" \
+			script "! stat .git"
 		run_task \
 			name "Show revision" \
 			script "cat REVISION"
@@ -158,7 +161,7 @@ function release_management { #@test
 		run_task \
 			name "Deploy" \
 			local 1 \
-			script "rsync_git_repository"
+			script "upload_release"
 		run_task \
 			name "Verify" \
 			script "stat t/main.bats > /dev/null"
@@ -186,8 +189,11 @@ function release_management { #@test
 		run_task \
 			name "Ensure release 2 exists" \
 			script "stat ~/code/2 >/dev/null"
+		run_task \
+			name "Remove old" \
+			script "remove_old_releases"
 	EOF
-	run -0 "$TEST_SCRIPT" -f "${TEST_INPUT_FILE}.sh" release_dir code/3  releases_keep 2
+	run -0 "$TEST_SCRIPT" -f "${TEST_INPUT_FILE}.sh" release_dir code/3
 	find_in_output "Current: 3"
 	find_in_output "Releases: 3"
 }
@@ -207,7 +213,7 @@ function yaml_release_management { #@test
 cat >> "${TEST_INPUT_FILE}.yml" <<"EOF"
     - name: Deploy
       local: true
-      script: rsync_git_repository
+      script: upload_release
     - name: Verify
       script: stat t/main.bats > /dev/null
     - name: Link

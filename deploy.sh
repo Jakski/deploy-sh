@@ -52,7 +52,7 @@ main_hook() {
 		q \
 		exec_ssh \
 		link_release \
-		rsync_git_repository \
+		upload_release \
 		remove_old_releases
 	do
 		add_deployment_function "$fn"
@@ -193,14 +193,13 @@ link_release() {
 	ln -Tsvf ~/"${DEPLOY_RELEASE_DIR}" ~/"${DEPLOY_RELEASE_DIR}/../current"
 }
 
-rsync_git_repository() {
+upload_release() {
 	: "${DEPLOY_RELEASE_DIR:?}"
 	declare \
-		files \
+		revision \
 		revision \
 		config_file
-	files=$(git ls-tree -r --name-only HEAD)
-	revision=$(git rev-parse HEAD)
+	revision=$(git rev-parse HEAD 2>/dev/null) || revision=""
 	config_file=$(q "${SCRIPT_TMP_DIR}/ssh_config")
 	(
 		exec_ssh <<-EOF
@@ -212,11 +211,17 @@ rsync_git_repository() {
 	rsync \
 		--rsh "ssh -F ${config_file}" \
 		--archive \
+		--exclude ".git" \
 		--recursive \
 		--protect-args \
-		--files-from <(echo "$files") \
 		. \
 		"${DEPLOY_HOST_ADDRESS}:${DEPLOY_RELEASE_DIR}"
+	# rsync mirrors source directory timestamp, which makes assessing release age hard.
+	(
+		exec_ssh <<-EOF
+			touch $(q "$DEPLOY_RELEASE_DIR")
+		EOF
+	)
 }
 
 remove_old_releases() {
@@ -226,19 +231,23 @@ remove_old_releases() {
 		releases_dir \
 		release_dir \
 		old_release
+	# Real paths are required to avoid removing current release.
 	releases_dir=$(realpath ~/"${DEPLOY_RELEASE_DIR}/..")
 	release_dir=$(realpath ~/"$DEPLOY_RELEASE_DIR")
 	while read -r old_release; do
 		old_release="${releases_dir}/${old_release}"
 		# Omit links in case `current` is used to mark latest release.
 		if [ -L "$old_release" ]; then
+			echo "Link detected ${old_release}"
 			continue
 		fi
 		release_num=$((release_num + 1))
 		if [ "$release_num" -le "${DEPLOY_RELEASES_KEEP:-2}" ]; then
+			echo "Saving ${old_release}"
 			continue
 		fi
 		if [ "$old_release" = "$release_dir" ]; then
+			echo "Saving recent ${old_release}"
 			continue
 		fi
 		echo "Removing ${old_release}"
