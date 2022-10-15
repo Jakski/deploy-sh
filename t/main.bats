@@ -197,9 +197,10 @@ function forced_fail { #@test
 		DEPLOY_DEFAULT_HOSTS="localhost1 127.0.0.1"
 		run_task \
 			name "Fail" \
-			script "exit 1"
+			script "exit 44"
 	EOF
 	run -1 "$TEST_SCRIPT" -f "${TEST_INPUT_FILE}.sh"
+	find_in_output "failed with exit code 44"
 }
 
 function yaml_release_management { #@test

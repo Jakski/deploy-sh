@@ -26,6 +26,8 @@ ERR_MSG=""
 DEPLOY_APP_NAME=""
 DEPLOY_EXTRA=""
 DEPLOY_LOG_FILE=""
+DEPLOY_JOB_IDS=()
+DEPLOY_JOB_STATUSES=()
 
 start_jobs_hook() {
 	declare extra
@@ -257,7 +259,7 @@ start_jobs() {
 	if [ "$is_local" = 1 ]; then
 		exec_func="exec_bash"
 	fi
-	cat > "${SCRIPT_TMP_DIR}/ssh_config" <<<"$DEPLOY_SSH_CONFIG"
+	cat > "${SCRIPT_TMP_DIR}/ssh_config" <<< "$DEPLOY_SSH_CONFIG"
 	start_jobs_hook
 	while read -r host_name host_address; do
 		"$exec_func" "$host_num" "$host_address" >"${SCRIPT_TMP_DIR}/${host_num}.output" 2>&1 <<-EOF &
@@ -270,7 +272,7 @@ start_jobs() {
 			${DEPLOY_TASK_EXTRA}
 			${script}
 		EOF
-		echo "$!"
+		DEPLOY_JOB_IDS+=("$!")
 		host_num=$((host_num + 1))
 	done <<< "$hosts"
 }
@@ -278,16 +280,12 @@ start_jobs() {
 wait_for_jobs() {
 	declare \
 		hosts=$1 \
-		host_jobs=$2 \
 		host_num=0 \
-		job_status \
-		job_id
+		job_status
 	while read -r host_name host_address; do
 		job_status=0
-		job_id=$(head -n 1 <<< "$host_jobs")
-		host_jobs=$(tail -n +2 <<< "$host_jobs")
-		wait "$job_id" || job_status=$?
-		echo "$job_status" > "${SCRIPT_TMP_DIR}/${host_num}.status"
+		wait "${DEPLOY_JOB_IDS["$host_num"]}" || job_status=$?
+		DEPLOY_JOB_STATUSES+=("$job_status")
 		host_num=$((host_num + 1))
 	done <<< "$hosts"
 }
@@ -296,13 +294,13 @@ report_jobs() {
 	declare \
 		hosts=$1 \
 		errors="" \
-		exit_code
+		job_status
 	host_num=0
 	while read -r host_name host_address; do
 		echo "Host: ${host_name} Address: ${host_address}" | indent "  " | log
-		exit_code=$(cat "${SCRIPT_TMP_DIR}/${host_num}.status")
-		if [ "$exit_code" != 0 ]; then
-			errors="Host ${host_name} failed with exit code ${exit_code}"$'\n'"${errors}"
+		job_status=${DEPLOY_JOB_STATUSES["$host_num"]}
+		if [ "$job_status" != 0 ]; then
+			errors="Host ${host_name} failed with exit code ${job_status}"$'\n'"${errors}"
 		fi
 		# Remove problematic escape codes
 		# https://stackoverflow.com/a/43627833
@@ -324,8 +322,7 @@ run_task() {
 		OPT_LOCAL=0 \
 		OPT_RUN_ONCE=0 \
 		OPT_HOSTS="" \
-		timestamp \
-		host_jobs
+		timestamp
 	eval "$(get_opts "$@")"
 	if [ "$OPT_LOCAL" = "true" ]; then
 		OPT_LOCAL=1
@@ -348,11 +345,12 @@ run_task() {
 		read -r OPT_HOSTS <<< "$OPT_HOSTS"
 	fi
 	timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+	DEPLOY_JOB_IDS=()
+	DEPLOY_JOB_STATUSES=()
 	echo "${timestamp} Step: ${OPT_NAME}" | log
 	# It can't be done in subshell, because Bash needs to own job IDs.
-	start_jobs "$OPT_LOCAL" "$OPT_SCRIPT" "$OPT_HOSTS" > "${SCRIPT_TMP_DIR}/jobs"
-	mapfile -d "" host_jobs < "${SCRIPT_TMP_DIR}/jobs"
-	wait_for_jobs "$OPT_HOSTS" "$host_jobs"
+	start_jobs "$OPT_LOCAL" "$OPT_SCRIPT" "$OPT_HOSTS"
+	wait_for_jobs "$OPT_HOSTS"
 	report_jobs "$OPT_HOSTS"
 }
 
