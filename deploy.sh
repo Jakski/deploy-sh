@@ -70,7 +70,7 @@ log() {
 	if [ -n "$DEPLOY_LOG_FILE" ]; then
 		tee -a "$DEPLOY_LOG_FILE"
 	else
-		while read -r line; do
+		while IFS="" read -r line; do
 			echo "$line"
 		done
 	fi
@@ -222,6 +222,7 @@ upload_release() {
 			touch $(q "$DEPLOY_RELEASE_DIR")
 		EOF
 	)
+	echo "Uploaded release to ~/${DEPLOY_RELEASE_DIR}"
 }
 
 remove_old_releases() {
@@ -238,16 +239,13 @@ remove_old_releases() {
 		old_release="${releases_dir}/${old_release}"
 		# Omit links in case `current` is used to mark latest release.
 		if [ -L "$old_release" ]; then
-			echo "Link detected ${old_release}"
 			continue
 		fi
 		release_num=$((release_num + 1))
 		if [ "$release_num" -le "${DEPLOY_RELEASES_KEEP:-2}" ]; then
-			echo "Saving ${old_release}"
 			continue
 		fi
 		if [ "$old_release" = "$release_dir" ]; then
-			echo "Saving recent ${old_release}"
 			continue
 		fi
 		echo "Removing ${old_release}"
@@ -277,6 +275,7 @@ start_jobs() {
 			DEPLOY_HOST_NAME=$(q "$host_name")
 			DEPLOY_HOST_ADDRESS=$(q "$host_address")
 			DEPLOY_HOST_NUM=$(q "$host_num")
+			DEPLOY_APP_NAME=$(q "$DEPLOY_APP_NAME")
 			${DEPLOY_EXTRA}
 			${DEPLOY_TASK_EXTRA}
 			${script}
