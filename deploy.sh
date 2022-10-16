@@ -228,6 +228,7 @@ upload_release() {
 remove_old_releases() {
 	: "${DEPLOY_RELEASE_DIR:?}"
 	declare \
+		releases_keep=${1:-2} \
 		release_num=0 \
 		releases_dir \
 		release_dir \
@@ -242,7 +243,7 @@ remove_old_releases() {
 			continue
 		fi
 		release_num=$((release_num + 1))
-		if [ "$release_num" -le "${DEPLOY_RELEASES_KEEP:-2}" ]; then
+		if [ "$release_num" -le "$releases_keep" ]; then
 			continue
 		fi
 		if [ "$old_release" = "$release_dir" ]; then
