@@ -104,6 +104,22 @@ function simple_command { #@test
 	done
 }
 
+function tailing { #@test
+	cat >> "${TEST_INPUT_FILE}.sh" <<-"EOF"
+		DEPLOY_DEFAULT_HOSTS="localhost1 127.0.0.1"
+		run_task \
+			name "Test" \
+			local 1 \
+			script "echo -n test-msg-; sleep 0.1; echo suffix; echo -n no-new-line"
+		run_task name "test2" local 1 script "sleep 0.1"
+	EOF
+	run -0 "$TEST_SCRIPT" --logfile "$TEST_LOG_FILE" -f "${TEST_INPUT_FILE}.sh"
+	find_in_output "test-msg-suffix"
+	find_in_text  "$(cat "$TEST_LOG_FILE")" "test-msg-suffix"
+	find_in_output "no-new-line"
+	find_in_text "$(cat "$TEST_LOG_FILE")" "no-new-line"
+}
+
 function added_extras() { #@test
 	cat >> "${TEST_INPUT_FILE}.sh" <<-"EOF"
 		extra_function() {

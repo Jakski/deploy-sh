@@ -15,7 +15,7 @@
 # SC2128: Expanding an array without an index only gives the first element.
 
 set -euo pipefail -o errtrace
-shopt -s inherit_errexit nullglob
+shopt -s inherit_errexit nullglob lastpipe
 
 DEPLOY_DEFAULT_HOSTS=""
 : "${DEPLOY_SSH_CONFIG:=}"
@@ -67,13 +67,12 @@ q() {
 
 log() {
 	declare line
-	if [ -n "$DEPLOY_LOG_FILE" ]; then
-		tee -a "$DEPLOY_LOG_FILE"
-	else
-		while IFS="" read -r line; do
-			echo "$line"
-		done
-	fi
+	while IFS="" read -r line; do
+		if [ -n "$DEPLOY_LOG_FILE" ]; then
+			echo "$line" >> "$DEPLOY_LOG_FILE"
+		fi
+		echo "$line"
+	done
 }
 
 on_error() {
@@ -286,12 +285,53 @@ start_jobs() {
 	done <<< "$hosts"
 }
 
+read_sleep() {
+	read -rt "$1" <> <(:) || :
+}
+
+tail_log() {
+	declare \
+		host_num=$1 \
+		last=0 \
+		chars \
+		job_pid \
+		log_fd
+	exec {log_fd}<>"${SCRIPT_TMP_DIR}/${host_num}.output"
+	while true; do
+		if [ "$last" = 1 ]; then
+			break
+		fi
+		last=1
+		for job_pid in $(jobs -p -r); do
+			if [ "$job_pid" = "${DEPLOY_JOB_IDS["$host_num"]}" ]; then
+				last=0
+				break
+			fi
+		done
+		mapfile -d "" -u "$log_fd" chars
+		[ -z "${chars:-}" ] || echo -n "$chars"
+		read_sleep 0.1
+	done
+	if [[ ! ${chars:-} =~ $'\n'$ ]]; then
+		echo
+	fi
+	eval "exec ${log_fd}>&-"
+}
+
 wait_for_jobs() {
 	declare \
 		hosts=$1 \
 		host_num=0 \
-		job_status
+		job_status \
+		hosts_array
+	mapfile -t hosts_array <<< "$hosts"
 	while read -r host_name host_address; do
+		if [ "${#hosts_array[@]}" = 1 ]; then
+			echo "Host: ${host_name} Address: ${host_address}" | indent "  " | log
+			tail_log "$host_num" "$host_name" "$host_address" \
+				> >(indent "    " | flatten 1 | log)
+			wait "$!"
+		fi
 		job_status=0
 		wait "${DEPLOY_JOB_IDS["$host_num"]}" || job_status=$?
 		DEPLOY_JOB_STATUSES+=("$job_status")
@@ -299,23 +339,37 @@ wait_for_jobs() {
 	done <<< "$hosts"
 }
 
+flatten() {
+	declare no_buffer=${1:-0}
+	declare -a args=()
+	if [ "$no_buffer" = 1 ]; then
+		args+=("-u")
+	fi
+	args+=("s,\x1B\[[0-9;]*[a-zA-Z],,g")
+	# Remove problematic escape codes
+	# https://stackoverflow.com/a/43627833
+	sed "${args[@]}"
+}
+
 report_jobs() {
 	declare \
 		hosts=$1 \
 		errors="" \
+		hosts_array \
 		job_status
+	mapfile -t hosts_array <<< "$hosts"
 	host_num=0
 	while read -r host_name host_address; do
-		echo "Host: ${host_name} Address: ${host_address}" | indent "  " | log
 		job_status=${DEPLOY_JOB_STATUSES["$host_num"]}
 		if [ "$job_status" != 0 ]; then
 			errors="Host ${host_name} failed with exit code ${job_status}"$'\n'"${errors}"
 		fi
-		# Remove problematic escape codes
-		# https://stackoverflow.com/a/43627833
-		indent "    " < "${SCRIPT_TMP_DIR}/${host_num}.output" \
-			| sed "s,\x1B\[[0-9;]*[a-zA-Z],,g" \
-			| log
+		if [ "${#hosts_array[@]}" != 1 ]; then
+			echo "Host: ${host_name} Address: ${host_address}" | indent "  " | log
+			indent "    " < "${SCRIPT_TMP_DIR}/${host_num}.output" \
+				| flatten \
+				| log
+		fi
 		host_num=$((host_num + 1))
 	done <<< "$hosts"
 	if [ -n "$errors" ]; then
