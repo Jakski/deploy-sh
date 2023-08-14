@@ -127,9 +127,9 @@ log() {
 	declare line
 	while IFS="" read -r line; do
 		if [ -n "$DEPLOY_LOG_FILE" ]; then
-			echo "$line" >> "$DEPLOY_LOG_FILE"
+			printf "%s\n" "$line" >> "$DEPLOY_LOG_FILE"
 		fi
-		echo "$line"
+		printf "%s\n" "$line"
 	done
 }
 
@@ -138,9 +138,9 @@ on_error() {
 		exit_code=$? \
 		cmd=$BASH_COMMAND
 	if [ -n "$ERR_MSG" ]; then
-		echo "$ERR_MSG" >&2
+		printf "%s\n" "$ERR_MSG" >&2
 	else
-		echo "Failing with exit code ${exit_code} at ${*} in command: ${cmd}" >&2
+		printf "%s\n" "Failing with exit code ${exit_code} at ${*} in command: ${cmd}" >&2
 	fi
 	exit "$exit_code"
 }
@@ -161,7 +161,7 @@ get_opts() {
 		name=$1 value=$2
 		name="${prefix}_${name^^}"
 		shift 2
-		echo "declare $(printf '%q' "$name")=$(printf '%q' "$value")"
+		printf "%s\n" "declare $(printf '%q' "$name")=$(printf '%q' "$value")"
 	done
 }
 
@@ -215,7 +215,7 @@ foreach (@$input) {
 	print "\n";
 }
 EOF
-	plan=$(perl <(echo "$converter") "$DEPLOY_APP_NAME" < "$input")
+	plan=$(perl <(printf "%s\n" "$converter") "$DEPLOY_APP_NAME" < "$input")
 	eval "$plan"
 }
 
@@ -241,7 +241,7 @@ indent() {
 		padding=$1 \
 		line
 	while read -r line; do
-		echo "${padding}${line}"
+		printf "%s\n" "${padding}${line}"
 	done
 }
 
@@ -262,7 +262,7 @@ upload_release() {
 		exec_ssh <<-EOF
 			mkdir -p $(q "$DEPLOY_RELEASE_DIR")
 			cd $(q "$DEPLOY_RELEASE_DIR")
-			echo $(q "$revision") > REVISION
+			printf "%s\\n" $(q "$revision") > REVISION
 		EOF
 	)
 	rsync \
@@ -279,7 +279,7 @@ upload_release() {
 			touch $(q "$DEPLOY_RELEASE_DIR")
 		EOF
 	)
-	echo "Uploaded release to ~/${DEPLOY_RELEASE_DIR}"
+	printf "%s\n" "Uploaded release to ~/${DEPLOY_RELEASE_DIR}"
 }
 
 checkout_repository() {
@@ -325,7 +325,7 @@ remove_old_releases() {
 		if [ "$old_release" = "$release_dir" ]; then
 			continue
 		fi
-		echo "Removing ${old_release}"
+		printf "%s\n" "Removing ${old_release}"
 		rm -rf "$old_release"
 	done < <(ls -1t "$releases_dir")
 }
@@ -386,7 +386,7 @@ tail_log() {
 			fi
 		done
 		mapfile -d "" -u "$log_fd" chars
-		[ -z "${chars:-}" ] || echo -n "$chars"
+		[ -z "${chars:-}" ] || printf "%s" "$chars"
 		read_sleep 0.1
 	done
 	if [[ ! ${chars:-} =~ $'\n'$ ]]; then
@@ -404,7 +404,7 @@ wait_for_jobs() {
 	mapfile -t hosts_array <<< "$hosts"
 	while read -r host_name host_address; do
 		if [ "${#hosts_array[@]}" = 1 ]; then
-			echo "Host: ${host_name} Address: ${host_address}" | indent "  " | log
+			printf "%s\n" "Host: ${host_name} Address: ${host_address}" | indent "  " | log
 			tail_log "$host_num" "$host_name" "$host_address" \
 				> >(indent "    " | flatten 1 | log)
 			wait "$!"
@@ -442,7 +442,7 @@ report_jobs() {
 			errors="Host ${host_name} failed with exit code ${job_status}"$'\n'"${errors}"
 		fi
 		if [ "${#hosts_array[@]}" != 1 ]; then
-			echo "Host: ${host_name} Address: ${host_address}" | indent "  " | log
+			printf "%s\n" "Host: ${host_name} Address: ${host_address}" | indent "  " | log
 			indent "    " < "${SCRIPT_TMP_DIR}/${host_num}.output" \
 				| flatten \
 				| log
@@ -450,8 +450,8 @@ report_jobs() {
 		host_num=$((host_num + 1))
 	done <<< "$hosts"
 	if [ -n "$errors" ]; then
-		echo "-------------------------------------------------------------------------------" | log
-		echo "$errors" | log
+		printf "%s\n" "-------------------------------------------------------------------------------" | log
+		printf "%s\n" "$errors" | log
 		ERR_MSG="Deployment failed"
 		return 1
 	fi
@@ -487,7 +487,7 @@ run_task() {
 	timestamp=$(date +"%Y-%m-%d %H:%M:%S")
 	DEPLOY_JOB_IDS=()
 	DEPLOY_JOB_STATUSES=()
-	echo "${timestamp} Step: ${OPT_NAME}" | log
+	printf "%s\n" "${timestamp} Step: ${OPT_NAME}" | log
 	# It can't be done in subshell, because Bash needs to own job IDs.
 	start_jobs "$OPT_LOCAL" "$OPT_SCRIPT" "$OPT_HOSTS"
 	wait_for_jobs "$OPT_HOSTS"
@@ -574,7 +574,7 @@ parse_arguments() {
 	if command -v "deploy_from_${OPT_FORMAT}" >/dev/null; then
 		"deploy_from_${OPT_FORMAT}" "$OPT_INPUT"
 	else
-		echo "Wrong deployment format: ${OPT_FORMAT}" >&2
+		printf "%s\n" "Wrong deployment format: ${OPT_FORMAT}" >&2
 		return 1
 	fi
 }
